@@ -1,23 +1,22 @@
 {
   "hook_event_name": "Status",
-  "session_id": "abc123...",
-  "transcript_path": "/path/to/transcript.json",
-  "cwd": "/current/working/directory",
+  "session_id": "abc123",
+  "cwd": "/Users/cj.silverio/code/forks/cc-statusline-rs",
   "model": {
-    "id": "claude-opus-4-1",
+    "id": "claude-opus-4-6",
     "display_name": "Opus"
   },
   "workspace": {
-    "current_dir": "/current/working/directory",
-    "project_dir": "/original/project/directory"
+    "current_dir": "/Users/cj.silverio/code/forks/cc-statusline-rs",
+    "project_dir": "/Users/cj.silverio/code/forks/cc-statusline-rs"
   },
   "version": "1.0.80",
   "output_style": {
-    "name": "default"
+    "name": "explanatory"
   },
   "cost": {
     "total_cost_usd": 7.50,
-    "total_duration_ms": 45000,
+    "total_duration_ms": 945000,
     "total_api_duration_ms": 2300,
     "total_lines_added": 156,
     "total_lines_removed": 23
@@ -26,11 +25,20 @@
     "total_input_tokens": 15234,
     "total_output_tokens": 4521,
     "context_window_size": 200000,
+    "used_percentage": 45,
+    "remaining_percentage": 55,
     "current_usage": {
       "input_tokens": 8500,
       "output_tokens": 1200,
       "cache_creation_input_tokens": 5000,
       "cache_read_input_tokens": 2000
     }
+  },
+  "worktree": {
+    "name": "feature-branch",
+    "branch": "worktree-feature-branch"
+  },
+  "agent": {
+    "name": "code-reviewer"
   }
 }
