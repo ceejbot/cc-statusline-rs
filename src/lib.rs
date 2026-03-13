@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn deserialize_empty_json() {
-        let input: StatusInput = serde_json::from_str("{}").unwrap();
+        let input: StatusInput = serde_json::from_str("{}").expect("empty JSON should deserialize");
         assert!(input.workspace.current_dir.is_none());
         assert!(input.model.display_name.is_none());
         assert!(input.context_window.is_none());
@@ -462,7 +462,8 @@ mod tests {
     #[test]
     fn deserialize_partial_json() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}}"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("partial JSON should deserialize");
         assert_eq!(input.workspace.current_dir.as_deref(), Some("/tmp"));
         assert_eq!(input.model.display_name.as_deref(), Some("Opus"));
         assert!(input.cost.is_none());
@@ -479,20 +480,45 @@ mod tests {
             "worktree": {"name": "feat", "branch": "feat-branch"},
             "agent": {"name": "reviewer"}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("full JSON should deserialize");
         assert_eq!(input.model.display_name.as_deref(), Some("Sonnet"));
         assert_eq!(
-            input.context_window.as_ref().unwrap().used_percentage,
+            input
+                .context_window
+                .as_ref()
+                .expect("context_window present")
+                .used_percentage,
             Some(42.5)
         );
-        assert_eq!(input.cost.as_ref().unwrap().total_cost_usd, 3.50);
-        assert_eq!(input.cost.as_ref().unwrap().total_duration_ms, Some(120000));
         assert_eq!(
-            input.worktree.as_ref().unwrap().name.as_deref(),
+            input.cost.as_ref().expect("cost present").total_cost_usd,
+            3.50
+        );
+        assert_eq!(
+            input
+                .cost
+                .as_ref()
+                .expect("cost present")
+                .total_duration_ms,
+            Some(120000)
+        );
+        assert_eq!(
+            input
+                .worktree
+                .as_ref()
+                .expect("worktree present")
+                .name
+                .as_deref(),
             Some("feat")
         );
         assert_eq!(
-            input.agent.as_ref().unwrap().name.as_deref(),
+            input
+                .agent
+                .as_ref()
+                .expect("agent present")
+                .name
+                .as_deref(),
             Some("reviewer")
         );
     }
@@ -500,7 +526,8 @@ mod tests {
     #[test]
     fn deserialize_ignores_unknown_fields() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "unknown_field": 42}"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("JSON with unknown fields should deserialize");
         assert_eq!(input.workspace.current_dir.as_deref(), Some("/tmp"));
     }
 
@@ -527,7 +554,8 @@ mod tests {
     #[test]
     fn statusline_non_git_dir() {
         let input: StatusInput =
-            serde_json::from_str(r#"{"workspace": {"current_dir": "/tmp"}}"#).unwrap();
+            serde_json::from_str(r#"{"workspace": {"current_dir": "/tmp"}}"#)
+                .expect("non-git dir JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("/tmp"));
         // No branch indicator for non-git dirs
@@ -537,7 +565,8 @@ mod tests {
     #[test]
     fn statusline_with_model() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}}"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("model JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("Opus"));
     }
@@ -549,7 +578,8 @@ mod tests {
             "model": {"display_name": "Opus"},
             "output_style": {"name": "concise"}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("style JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("Opus"));
         assert!(output.contains("concise"));
@@ -561,7 +591,8 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("cost JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("3.50"));
         assert!(output.contains("2m"));
@@ -576,7 +607,8 @@ mod tests {
         let json = format!(
             r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "cost": {{"total_cost_usd": 1.00, "total_lines_added": 10, "total_lines_removed": 5}}}}"#
         );
-        let input: StatusInput = serde_json::from_str(&json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("git repo JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("+10"));
         assert!(output.contains("-5"));
@@ -585,7 +617,8 @@ mod tests {
     #[test]
     fn statusline_with_agent() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "agent": {"name": "code-reviewer"}}"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("agent JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("code-reviewer"));
     }
@@ -596,7 +629,8 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "context_window": {"context_window_size": 200000, "used_percentage": 95.0}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("high context JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("95%"));
         assert!(output.contains(RED));
@@ -608,12 +642,13 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "context_window": {"context_window_size": 200000, "used_percentage": 20.0}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("low context JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("20%"));
         // Gray is used for low percentages — check the percentage is colored gray
         // The output has the pattern: {pct_color}20%{RESET}
-        let pct_idx = output.find("20%").unwrap();
+        let pct_idx = output.find("20%").expect("output should contain 20%");
         let preceding = &output[..pct_idx];
         assert!(preceding.ends_with(GRAY));
     }
@@ -627,7 +662,8 @@ mod tests {
                 "current_usage": {"input_tokens": 30000, "cache_creation_input_tokens": 10000, "cache_read_input_tokens": 10000}
             }
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("fallback context JSON should deserialize");
         let output = build_statusline_from(&input);
         // (30000+10000+10000)/100000 = 50%
         assert!(output.contains("50%"));
@@ -639,7 +675,8 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "cost": {"total_cost_usd": 0.0}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("zero cost JSON should deserialize");
         let output = build_statusline_from(&input);
         // The dollar sign icon should not appear for zero cost
         assert!(!output.contains("\u{f155}"));
@@ -648,7 +685,8 @@ mod tests {
     #[test]
     fn statusline_empty_agent_hidden() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "agent": {"name": ""}}"#;
-        let input: StatusInput = serde_json::from_str(json).unwrap();
+        let input: StatusInput =
+            serde_json::from_str(json).expect("empty agent JSON should deserialize");
         let output = build_statusline_from(&input);
         // Agent icon should not appear for empty name
         assert!(!output.contains("\u{f06a9}"));
