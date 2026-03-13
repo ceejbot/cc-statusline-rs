@@ -1,0 +1,109 @@
+name: release
+permissions:
+    contents: write
+
+on:
+    push:
+        tags:
+            - "v**[0-9]+.[0-9]+.[0-9]+*"
+    workflow_dispatch:
+        inputs:
+            ref_name:
+                type: string
+                description: the refname to build a release from
+                default: "main"
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    CARGO_TERM_COLOR: always
+
+jobs:
+    preflight:
+        name: preflight
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: get stable + nightly Rust
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  toolchain: nightly, stable
+                  target: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+                  components: clippy, rustfmt
+                  cache-directories: |
+                      ~/.cargo/registry
+                      ~/.cargo/bin
+                      target
+
+            - name: consult Clippy
+              run: cargo +stable clippy --all-targets
+
+            - name: check formatting
+              run: cargo +nightly fmt --check --all
+
+            - name: set ref_name
+              shell: bash
+              run: |
+                if [ -n "${{ inputs.ref_name }}" ]; then
+                  echo "REF_NAME=${{ inputs.ref_name }}" >> $GITHUB_ENV
+                else
+                  echo "REF_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+                fi
+
+            - name: create github release
+              continue-on-error: true # for testing
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  release_url=$(gh release create $REF_NAME --generate-notes)
+
+            - name: build for release and upload
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  REF_NAME="${{ github.ref_name }}"
+                  if [ -n "${{ inputs.ref_name }}" ]; then
+                      REF_NAME="${{ inputs.ref_name }}"
+                  fi
+                  cargo +stable build --release
+                  tar czf cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz --strip-components=2  target/release/cc-statusline-rs
+                  gh release upload "$REF_NAME" "cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz"
+
+
+    release-macos:
+        name: release-macos
+        runs-on: macos-latest
+        needs: preflight
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: get stable Rust
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  toolchain: stable
+                  target: aarch64-apple-darwin
+                  cache-directories: |
+                      ~/.cargo/registry
+                      ~/.cargo/bin
+                      target
+
+            - name: build for release
+              run: |
+                  cargo +stable build --release --target aarch64-apple-darwin
+
+            - name: upload release assets
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  REF_NAME="${{ github.ref_name }}"
+                  if [ -n "${{ inputs.ref_name }}" ]; then
+                      REF_NAME="${{ inputs.ref_name }}"
+                  fi
+                  mkdir -p dist
+                  cd dist
+                  tar czf cc-statusline-rs-$target.tar.gz --strip-components=4  ../target/$target/release/cc-statusline-rs
+                  gh release upload "$REF_NAME" "cc-statusline-rs-$target.tar.gz"
