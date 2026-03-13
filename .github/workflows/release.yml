@@ -70,7 +70,7 @@ jobs:
                       REF_NAME="${{ inputs.ref_name }}"
                   fi
                   cargo +stable build --release
-                  tar czf cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz --strip-components=2  target/release/cc-statusline-rs
+                  tar czf cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz --strip-components=2  target/release/statusline
                   gh release upload "$REF_NAME" "cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz"
 
 
@@ -103,7 +103,8 @@ jobs:
                   if [ -n "${{ inputs.ref_name }}" ]; then
                       REF_NAME="${{ inputs.ref_name }}"
                   fi
+                  target=aarch64-apple-darwin
                   mkdir -p dist
                   cd dist
-                  tar czf cc-statusline-rs-$target.tar.gz --strip-components=4  ../target/$target/release/cc-statusline-rs
+                  tar czf cc-statusline-rs-$target.tar.gz --strip-components=4  ../target/$target/release/statusline
                   gh release upload "$REF_NAME" "cc-statusline-rs-$target.tar.gz"
