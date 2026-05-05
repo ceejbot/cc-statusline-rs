@@ -32,6 +32,14 @@ struct StatusInput {
     worktree: Option<Worktree>,
     #[serde(default)]
     agent: Option<Agent>,
+    #[serde(default)]
+    effort: Option<Effort>,
+    #[serde(default)]
+    thinking: Option<Thinking>,
+    #[serde(default)]
+    vim: Option<Vim>,
+    #[serde(default)]
+    rate_limits: Option<RateLimits>,
 }
 
 #[derive(Deserialize, Default)]
@@ -96,6 +104,38 @@ struct Agent {
     name: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+struct Effort {
+    #[serde(default)]
+    level: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Thinking {
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct Vim {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct RateLimits {
+    #[serde(default)]
+    five_hour: Option<RateLimitWindow>,
+    #[serde(default)]
+    seven_day: Option<RateLimitWindow>,
+}
+
+#[derive(Deserialize, Default)]
+struct RateLimitWindow {
+    #[serde(default)]
+    used_percentage: f64,
+}
+
 pub fn statusline() -> String {
     let input = read_input().unwrap_or_default();
     render(&input)
@@ -103,11 +143,24 @@ pub fn statusline() -> String {
 
 fn render(input: &StatusInput) -> String {
     let model_display = if let Some(ref model) = input.model.display_name {
+        let model = model.replace(" (1M context)", "");
+        let effort_suffix = input
+            .effort
+            .as_ref()
+            .and_then(|e| e.level.as_deref())
+            .filter(|&l| l != "high")
+            .map(|l| format!("·{l}"))
+            .unwrap_or_default();
+        let thinking_glyph = if input.thinking.as_ref().is_some_and(|t| t.enabled) {
+            "✻"
+        } else {
+            ""
+        };
         let style_suffix = match input.output_style.name {
             Some(ref style) => format!(" {GRAY}({style}){RESET}"),
             None => String::new(),
         };
-        format!("{LIGHT_CYAN}\u{e26d} {ORANGE}{model}{style_suffix}")
+        format!("{LIGHT_CYAN}\u{e26d} {ORANGE}{model}{effort_suffix}{thinking_glyph}{style_suffix}")
     } else {
         String::new()
     };
@@ -130,29 +183,63 @@ fn render(input: &StatusInput) -> String {
             }
         };
 
-        let pct_color = if pct >= 90.0 {
-            RED
-        } else if pct >= 70.0 {
-            ORANGE
-        } else if pct >= 50.0 {
-            YELLOW
-        } else {
-            GRAY
-        };
-
         let bar_width: usize = 15;
-        let filled = (pct * bar_width as f64 / 100.0).round() as usize;
-        let filled = filled.min(bar_width);
-        let empty = bar_width - filled;
-        let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
+        let filled = ((pct * bar_width as f64 / 100.0).round() as usize).min(bar_width);
+        // Tick the 200k boundary when the window is larger than 200k.
+        let tick_at = (ctx.context_window_size > 200_000).then(|| {
+            ((200_000.0 * bar_width as f64) / ctx.context_window_size as f64).round() as usize
+        });
+        let mut bar = String::new();
+        for i in 0..bar_width {
+            if Some(i) == tick_at {
+                bar.push('┊');
+            }
+            bar.push(if i < filled { '\u{2588}' } else { '\u{2591}' });
+        }
 
         format!(
-            "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {pct_color}{}%{RESET}",
+            "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {}{}%{RESET}",
+            pct_color(pct),
             pct.round() as u32
         )
     } else {
         String::new()
     };
+
+    let vim_display = input
+        .vim
+        .as_ref()
+        .and_then(|v| v.mode.as_deref())
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            let (label, color) = match m {
+                "NORMAL" => ("N", GREEN),
+                "INSERT" => ("I", ORANGE),
+                "VISUAL" => ("V", LIGHT_MAGENTA),
+                "VISUAL LINE" => ("V-L", LIGHT_MAGENTA),
+                other => (other, GRAY),
+            };
+            format!("{color}[{label}]{RESET} ")
+        })
+        .unwrap_or_default();
+
+    let rate_limits_display = input
+        .rate_limits
+        .as_ref()
+        .map(|rl| {
+            let mut parts = Vec::new();
+            for (label, win) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
+                if let Some(w) = win {
+                    parts.push(format!(
+                        "{GRAY}{label} {}{}%{RESET}",
+                        pct_color(w.used_percentage),
+                        w.used_percentage.round() as u32
+                    ));
+                }
+            }
+            parts.join(&format!(" {GRAY}·{RESET} "))
+        })
+        .unwrap_or_default();
 
     let current_dir = match input.workspace.current_dir {
         Some(ref dir) => dir.as_str(),
@@ -241,6 +328,9 @@ fn render(input: &StatusInput) -> String {
     if !duration_display.is_empty() {
         components.push(duration_display);
     }
+    if !rate_limits_display.is_empty() {
+        components.push(rate_limits_display);
+    }
 
     let components_str = if components.is_empty() {
         String::new()
@@ -252,11 +342,23 @@ fn render(input: &StatusInput) -> String {
     };
 
     if branch.is_empty() {
-        format!("{CYAN}{display_dir}{RESET}{components_str}")
+        format!("{vim_display}{CYAN}{display_dir}{RESET}{components_str}")
     } else {
         format!(
-            "{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}"
+            "{vim_display}{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}"
         )
+    }
+}
+
+fn pct_color(pct: f64) -> &'static str {
+    if pct >= 90.0 {
+        RED
+    } else if pct >= 70.0 {
+        ORANGE
+    } else if pct >= 50.0 {
+        YELLOW
+    } else {
+        GRAY
     }
 }
 
@@ -672,5 +774,150 @@ mod tests {
         let output = build_statusline_from(&input);
         // Agent icon should not appear for empty name
         assert!(!output.contains("\u{f06a9}"));
+    }
+
+    // --- effort, thinking ---
+
+    #[test]
+    fn statusline_effort_max_shows_suffix() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "effort": {"level": "max"}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("Opus·max"));
+    }
+
+    #[test]
+    fn statusline_effort_high_suppressed() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "effort": {"level": "high"}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("·high"));
+        assert!(output.contains("Opus"));
+    }
+
+    #[test]
+    fn statusline_thinking_glyph_when_enabled() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "thinking": {"enabled": true}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("thinking JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("✻"));
+    }
+
+    #[test]
+    fn statusline_thinking_glyph_hidden_when_disabled() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "thinking": {"enabled": false}
+        }"#;
+        let input: StatusInput =
+            serde_json::from_str(json).expect("thinking-disabled JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("✻"));
+    }
+
+    #[test]
+    fn statusline_strips_one_million_context_suffix() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus 4.7 (1M context)"}
+        }"#;
+        let input: StatusInput =
+            serde_json::from_str(json).expect("model-with-suffix JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("Opus 4.7"));
+        assert!(!output.contains("(1M context)"));
+    }
+
+    // --- vim mode ---
+
+    #[test]
+    fn statusline_vim_normal_renders_n() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}, "vim": {"mode": "NORMAL"}}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("vim JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("[N]"));
+    }
+
+    #[test]
+    fn statusline_vim_insert_renders_i() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}, "vim": {"mode": "INSERT"}}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("vim JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("[I]"));
+    }
+
+    #[test]
+    fn statusline_vim_absent_renders_nothing() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("no-vim JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("[N]"));
+        assert!(!output.contains("[I]"));
+    }
+
+    // --- rate limits ---
+
+    #[test]
+    fn statusline_rate_limits_both_windows() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 78.5},
+                "seven_day": {"used_percentage": 34}
+            }
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("rate-limits JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("5h"));
+        assert!(output.contains("79%"));
+        assert!(output.contains("7d"));
+        assert!(output.contains("34%"));
+    }
+
+    #[test]
+    fn statusline_rate_limits_absent_renders_nothing() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}}"#;
+        let input: StatusInput =
+            serde_json::from_str(json).expect("no-rate-limits JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("5h"));
+        assert!(!output.contains("7d"));
+    }
+
+    // --- 200k tick ---
+
+    #[test]
+    fn statusline_200k_tick_on_one_million_window() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {"context_window_size": 1000000, "used_percentage": 22}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("1M-window JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains('┊'));
+    }
+
+    #[test]
+    fn statusline_no_tick_on_200k_window() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {"context_window_size": 200000, "used_percentage": 50}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("200k-window JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains('┊'));
     }
 }

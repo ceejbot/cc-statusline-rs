@@ -34,28 +34,35 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 | Struct | Key Fields | Purpose |
 |--------|-----------|---------|
-| `StatusInput` | workspace, model, output_style, context_window, cost, worktree, agent | Top-level container |
+| `StatusInput` | workspace, model, output_style, context_window, cost, worktree, agent, effort, thinking, vim, rate_limits | Top-level container |
 | `Workspace` | `current_dir: Option<String>` | Working directory (required for meaningful output) |
-| `Model` | `display_name: Option<String>` | Model name shown in statusline |
+| `Model` | `display_name: Option<String>` | Model name shown in statusline; `" (1M context)"` is stripped |
 | `OutputStyle` | `name: Option<String>` | Style label (e.g. "explanatory") shown in parens |
-| `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data |
+| `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data; bar shows a `┊` tick at the 200k boundary when `context_window_size > 200000` |
 | `CurrentUsage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` | Token breakdown for manual % calculation |
 | `Cost` | `total_cost_usd`, `total_duration_ms`, `total_lines_added`, `total_lines_removed` | Session cost and line change stats |
-| `Worktree` | `name`, `branch` | Worktree indicator |
+| `Worktree` | `name` | Worktree indicator |
 | `Agent` | `name: Option<String>` | Agent name when running as a sub-agent |
+| `Effort` | `level: Option<String>` | Reasoning effort suffix on model name (`·max`, `·xhigh`, `·low`, `·medium`); `high` is the default and is suppressed |
+| `Thinking` | `enabled: bool` | When true, appends `✻` glyph to model name |
+| `Vim` | `mode: Option<String>` | Vim mode badge at the front of the line; maps `NORMAL/INSERT/VISUAL/VISUAL LINE` to `[N]/[I]/[V]/[V-L]` |
+| `RateLimits` | `five_hour`, `seven_day` (each `RateLimitWindow`) | Subscriber-only; absent for API users. Shown at the end of the line |
+| `RateLimitWindow` | `used_percentage: f64` | Color-coded with the same thresholds as the context bar |
 
 ### Statusline Assembly
 
-`statusline()` builds these display components, then joins non-empty ones with `•` separators:
+`render()` builds these display components, then joins non-empty ones with `•` separators. The vim badge is prepended outside the bullet-joined sequence:
 
-1. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
-2. **Git branch**: Via `git rev-parse --abbrev-ref HEAD`, colored green, with `↟` worktree suffix
-3. **Lines changed**: `+N -M` from cost data, green/red
-4. **Model**: Nerd Font icon + model name in orange, optional style suffix in gray
-5. **Context bar**: 15-char progress bar (█/░) + percentage, color-coded by usage (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%)
-6. **Cost**: Dollar amount, color-coded (green <$5, yellow <$20, red ≥$20)
-7. **Agent**: Agent name in gray with icon
-8. **Duration**: Formatted as `Nh Mm` or `<1m`, from `total_duration_ms`
+1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
+2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
+3. **Git branch**: Via `git rev-parse --abbrev-ref HEAD`, colored green, with `↟` worktree suffix
+4. **Lines changed**: `+N -M` from cost data, green/red
+5. **Model**: Nerd Font icon + model name in orange, with optional `·<effort>` suffix (`·max`, etc.; `high` suppressed), `✻` thinking glyph, and style suffix in gray
+6. **Context bar**: 15-char progress bar (█/░) + percentage, color-coded via `pct_color()` (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%); `┊` tick inserted at the 200k boundary when `context_window_size > 200000`
+7. **Cost**: Dollar amount, color-coded (green <$5, yellow <$20, red ≥$20)
+8. **Agent**: Agent name in gray with icon
+9. **Duration**: Formatted as `Nh Mm` or `<1m`, from `total_duration_ms`
+10. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`
 
 ### ANSI Colors
 
@@ -63,19 +70,24 @@ Constants defined at the top of `lib.rs`: `RESET`, `RED`, `GREEN`, `YELLOW`, `CY
 
 ### Key Functions
 
+All internal; only `statusline()` is `pub`.
+
 - `statusline()` — Main orchestrator, returns the assembled String
+- `render(&StatusInput)` — Builds the display string from a parsed input
 - `read_input()` — Reads stdin, deserializes to `StatusInput`
-- `is_git_repo(dir)` — Checks `git rev-parse --is-inside-work-tree`
-- `get_git_branch(dir)` — Gets current branch name via git
-- `fish_shorten_path(path)` — Replaces $HOME with ~, shortens intermediate dirs to first char (hidden dirs keep dot + first char)
+- `is_git_repo(dir)` / `get_git_branch(dir)` — Git probes via `git rev-parse`
+- `fish_shorten_path(path)` — Strips `$HOME` prefix to `~`, shortens intermediate dirs to first char (hidden dirs keep dot + first char)
+- `pct_color(f64)` — Maps a percentage to one of red/orange/yellow/gray; shared by context bar and rate limits
 - `format_cost(f64)` — 3 decimal places below $0.01, 2 above
 - `format_duration(ms)` — Formats milliseconds as `Nh Mm`, `Nm`, or `<1m`
 
 ### Display Format
 
 ```
-path  branch(+N -M) • 󰊭 Model (style) • 󱦛 ███░░░░░░░░░░░░ 45% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m
+[N] path  branch(+N -M) • 󰊭 Model·max✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
 ```
+
+Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, and rate limits all degrade to nothing when their fields aren't present in the JSON.
 
 ## Dependencies
 

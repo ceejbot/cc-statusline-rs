@@ -3,8 +3,8 @@
 	"session_id": "abc123",
 	"cwd": "/path/to/current/cc-statusline-rs",
 	"model": {
-		"id": "claude-opus-4-6",
-		"display_name": "Opus"
+		"id": "claude-opus-4-7",
+		"display_name": "Opus 4.7 (1M context)"
 	},
 	"workspace": {
 		"current_dir": "/path/to/current/cc-statusline-rs",
@@ -12,7 +12,25 @@
 	},
 	"version": "1.0.80",
 	"output_style": {
-		"name": "default"
+		"name": "explanatory"
+	},
+	"effort": {
+		"level": "max"
+	},
+	"thinking": {
+		"enabled": true
+	},
+	"vim": {
+		"mode": "NORMAL"
+	},
+	"rate_limits": {
+		"five_hour": {
+			"used_percentage": 78.5,
+			"resets_at": 1746489600
+		},
+		"seven_day": {
+			"used_percentage": 34
+		}
 	},
 	"cost": {
 		"total_cost_usd": 7.5,
@@ -24,9 +42,9 @@
 	"context_window": {
 		"total_input_tokens": 15234,
 		"total_output_tokens": 4521,
-		"context_window_size": 200000,
-		"used_percentage": 45,
-		"remaining_percentage": 55,
+		"context_window_size": 1000000,
+		"used_percentage": 22,
+		"remaining_percentage": 78,
 		"current_usage": {
 			"input_tokens": 8500,
 			"output_tokens": 1200,
