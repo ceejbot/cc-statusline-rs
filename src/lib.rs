@@ -46,6 +46,8 @@ struct StatusInput {
 struct Workspace {
     #[serde(default)]
     current_dir: Option<String>,
+    #[serde(default)]
+    git_worktree: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -246,19 +248,28 @@ fn render(input: &StatusInput) -> String {
         None => return format!("{RED}\u{f071} missing workspace.current_dir{RESET}"),
     };
 
-    let branch = if is_git_repo(current_dir) {
-        let base = get_git_branch(current_dir);
-        let worktree_suffix = input
+    let branch_display = git_status(current_dir).map(|status| {
+        let mut s = format!("{GREEN}{}{RESET}", status.branch);
+        if status.dirty {
+            s.push_str(&format!("{RED}*{RESET}"));
+        }
+        if status.ahead > 0 {
+            s.push_str(&format!(" {GRAY}\u{2191}{}{RESET}", status.ahead));
+        }
+        if status.behind > 0 {
+            s.push_str(&format!(" {GRAY}\u{2193}{}{RESET}", status.behind));
+        }
+        let worktree_name = input
             .worktree
             .as_ref()
             .and_then(|w| w.name.as_deref())
-            .filter(|n| !n.is_empty())
-            .map(|n| format!(" {GRAY}\u{219f}{n}{RESET}"))
-            .unwrap_or_default();
-        format!("{base}{worktree_suffix}")
-    } else {
-        String::new()
-    };
+            .or(input.workspace.git_worktree.as_deref())
+            .filter(|n| !n.is_empty());
+        if let Some(n) = worktree_name {
+            s.push_str(&format!(" {GRAY}\u{219f}{n}{RESET}"));
+        }
+        s
+    });
 
     let display_dir = fish_shorten_path(current_dir);
 
@@ -341,12 +352,11 @@ fn render(input: &StatusInput) -> String {
         )
     };
 
-    if branch.is_empty() {
-        format!("{vim_display}{CYAN}{display_dir}{RESET}{components_str}")
-    } else {
-        format!(
-            "{vim_display}{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}"
-        )
+    match branch_display {
+        Some(branch) => format!(
+            "{vim_display}{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2}{RESET} {branch}{lines_changed}{components_str}"
+        ),
+        None => format!("{vim_display}{CYAN}{display_dir}{RESET}{components_str}"),
     }
 }
 
@@ -368,28 +378,51 @@ fn read_input() -> Result<StatusInput, Box<dyn std::error::Error>> {
     Ok(serde_json::from_str(&buffer)?)
 }
 
-fn get_git_branch(working_dir: &str) -> String {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(working_dir)
-        .output();
-
-    match output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => String::new(),
-    }
+#[derive(Debug, Default, PartialEq)]
+struct GitStatus {
+    branch: String,
+    dirty: bool,
+    ahead: u32,
+    behind: u32,
 }
 
-fn is_git_repo(dir: &str) -> bool {
+fn git_status(dir: &str) -> Option<GitStatus> {
     let output = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
+        .args(["status", "--porcelain=v2", "--branch"])
         .current_dir(dir)
-        .output();
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(parse_git_status(&stdout))
+}
 
-    matches!(output, Ok(output) if output.status.success() &&
-             String::from_utf8_lossy(&output.stdout).trim() == "true")
+fn parse_git_status(stdout: &str) -> GitStatus {
+    let mut status = GitStatus::default();
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            status.branch = rest.to_string();
+        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+            let mut parts = rest.split_whitespace();
+            if let Some(a) = parts.next() {
+                status.ahead = a
+                    .strip_prefix('+')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+            if let Some(b) = parts.next() {
+                status.behind = b
+                    .strip_prefix('-')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            }
+        } else if !line.is_empty() && !line.starts_with('#') {
+            status.dirty = true;
+        }
+    }
+    status
 }
 
 fn home_dir() -> String {
@@ -620,11 +653,80 @@ mod tests {
         assert_eq!(input.workspace.current_dir.as_deref(), Some("/tmp"));
     }
 
-    // --- is_git_repo ---
+    // --- git_status ---
 
     #[test]
-    fn is_git_repo_false_for_tmp() {
-        assert!(!is_git_repo("/tmp"));
+    fn git_status_none_for_non_repo() {
+        assert!(git_status("/tmp").is_none());
+    }
+
+    #[test]
+    fn parse_git_status_clean_with_upstream() {
+        let stdout = "\
+# branch.oid abcdef0
+# branch.head main
+# branch.upstream origin/main
+# branch.ab +0 -0
+";
+        let s = parse_git_status(stdout);
+        assert_eq!(s.branch, "main");
+        assert!(!s.dirty);
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+    }
+
+    #[test]
+    fn parse_git_status_dirty_with_ahead_behind() {
+        let stdout = "\
+# branch.oid abcdef0
+# branch.head feat
+# branch.upstream origin/feat
+# branch.ab +2 -1
+1 .M N... 100644 100644 100644 aaa bbb file.txt
+? untracked.txt
+";
+        let s = parse_git_status(stdout);
+        assert_eq!(s.branch, "feat");
+        assert!(s.dirty);
+        assert_eq!(s.ahead, 2);
+        assert_eq!(s.behind, 1);
+    }
+
+    #[test]
+    fn parse_git_status_no_upstream() {
+        let stdout = "\
+# branch.oid abcdef0
+# branch.head new-branch
+";
+        let s = parse_git_status(stdout);
+        assert_eq!(s.branch, "new-branch");
+        assert!(!s.dirty);
+        assert_eq!(s.ahead, 0);
+        assert_eq!(s.behind, 0);
+    }
+
+    #[test]
+    fn parse_git_status_detached_head() {
+        let stdout = "\
+# branch.oid abcdef0
+# branch.head (detached)
+";
+        let s = parse_git_status(stdout);
+        assert_eq!(s.branch, "(detached)");
+        assert!(!s.dirty);
+    }
+
+    #[test]
+    fn parse_git_status_untracked_only_is_dirty() {
+        let stdout = "\
+# branch.oid abcdef0
+# branch.head main
+# branch.upstream origin/main
+# branch.ab +0 -0
+? new.txt
+";
+        let s = parse_git_status(stdout);
+        assert!(s.dirty);
     }
 
     // --- statusline integration tests ---

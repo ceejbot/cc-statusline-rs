@@ -35,7 +35,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 | Struct | Key Fields | Purpose |
 |--------|-----------|---------|
 | `StatusInput` | workspace, model, output_style, context_window, cost, worktree, agent, effort, thinking, vim, rate_limits | Top-level container |
-| `Workspace` | `current_dir: Option<String>` | Working directory (required for meaningful output) |
+| `Workspace` | `current_dir: Option<String>`, `git_worktree: Option<String>` | Working directory (required for meaningful output); `git_worktree` is set when cwd is in a linked git worktree |
 | `Model` | `display_name: Option<String>` | Model name shown in statusline; `" (1M context)"` is stripped |
 | `OutputStyle` | `name: Option<String>` | Style label (e.g. "explanatory") shown in parens |
 | `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data; bar shows a `┊` tick at the 200k boundary when `context_window_size > 200000` |
@@ -55,8 +55,8 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
 2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
-3. **Git branch**: Via `git rev-parse --abbrev-ref HEAD`, colored green, with `↟` worktree suffix
-4. **Lines changed**: `+N -M` from cost data, green/red
+3. **Git branch**: Via a single `git status --porcelain=v2 --branch` call, colored green. Decorations append in this order: `*` (red, when dirty), `↑N` (ahead), `↓M` (behind), `↟name` (worktree, from `worktree.name` or falling back to `workspace.git_worktree`)
+4. **Lines changed**: `+N -M` from cost data, green/red, glued to the branch component
 5. **Model**: Nerd Font icon + model name in orange, with optional `·<effort>` suffix (`·max`, etc.; `high` suppressed), `✻` thinking glyph, and style suffix in gray
 6. **Context bar**: 15-char progress bar (█/░) + percentage, color-coded via `pct_color()` (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%); `┊` tick inserted at the 200k boundary when `context_window_size > 200000`
 7. **Cost**: Dollar amount, color-coded (green <$5, yellow <$20, red ≥$20)
@@ -75,7 +75,8 @@ All internal; only `statusline()` is `pub`.
 - `statusline()` — Main orchestrator, returns the assembled String
 - `render(&StatusInput)` — Builds the display string from a parsed input
 - `read_input()` — Reads stdin, deserializes to `StatusInput`
-- `is_git_repo(dir)` / `get_git_branch(dir)` — Git probes via `git rev-parse`
+- `git_status(dir)` — Single `git status --porcelain=v2 --branch` call; returns `Option<GitStatus>` (None when not a repo)
+- `parse_git_status(stdout)` — Pure parser for porcelain v2 output, isolated for testing
 - `fish_shorten_path(path)` — Strips `$HOME` prefix to `~`, shortens intermediate dirs to first char (hidden dirs keep dot + first char)
 - `pct_color(f64)` — Maps a percentage to one of red/orange/yellow/gray; shared by context bar and rate limits
 - `format_cost(f64)` — 3 decimal places below $0.01, 2 above
@@ -84,7 +85,7 @@ All internal; only `statusline()` is `pub`.
 ### Display Format
 
 ```
-[N] path  branch(+N -M) • 󰊭 Model·max✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
+[N] path  branch*↑2↓1 ↟worktree(+N -M) • 󰊭 Model·max✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
 ```
 
 Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, and rate limits all degrade to nothing when their fields aren't present in the JSON.
