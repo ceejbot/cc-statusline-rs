@@ -17,85 +17,83 @@ const GOLD: &str = "\x1b[38;5;3m";
 
 // Typed serde structs for JSON input
 #[derive(Deserialize, Default)]
-pub struct StatusInput {
+struct StatusInput {
     #[serde(default)]
-    pub workspace: Workspace,
+    workspace: Workspace,
     #[serde(default)]
-    pub model: Model,
+    model: Model,
     #[serde(default)]
-    pub output_style: OutputStyle,
+    output_style: OutputStyle,
     #[serde(default)]
-    pub context_window: Option<ContextWindow>,
+    context_window: Option<ContextWindow>,
     #[serde(default)]
-    pub cost: Option<Cost>,
+    cost: Option<Cost>,
     #[serde(default)]
-    pub worktree: Option<Worktree>,
+    worktree: Option<Worktree>,
     #[serde(default)]
-    pub agent: Option<Agent>,
+    agent: Option<Agent>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct Workspace {
+struct Workspace {
     #[serde(default)]
-    pub current_dir: Option<String>,
+    current_dir: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct Model {
+struct Model {
     #[serde(default)]
-    pub display_name: Option<String>,
+    display_name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct OutputStyle {
+struct OutputStyle {
     #[serde(default)]
-    pub name: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct ContextWindow {
+struct ContextWindow {
     #[serde(default)]
-    pub context_window_size: u64,
+    context_window_size: u64,
     #[serde(default)]
-    pub used_percentage: Option<f64>,
+    used_percentage: Option<f64>,
     #[serde(default)]
-    pub current_usage: Option<CurrentUsage>,
+    current_usage: Option<CurrentUsage>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct CurrentUsage {
+struct CurrentUsage {
     #[serde(default)]
-    pub input_tokens: u64,
+    input_tokens: u64,
     #[serde(default)]
-    pub cache_creation_input_tokens: u64,
+    cache_creation_input_tokens: u64,
     #[serde(default)]
-    pub cache_read_input_tokens: u64,
+    cache_read_input_tokens: u64,
 }
 
 #[derive(Deserialize, Default)]
-pub struct Cost {
+struct Cost {
     #[serde(default)]
-    pub total_cost_usd: f64,
+    total_cost_usd: f64,
     #[serde(default)]
-    pub total_duration_ms: Option<u64>,
+    total_duration_ms: Option<u64>,
     #[serde(default)]
-    pub total_lines_added: u64,
+    total_lines_added: u64,
     #[serde(default)]
-    pub total_lines_removed: u64,
+    total_lines_removed: u64,
 }
 
 #[derive(Deserialize, Default)]
-pub struct Worktree {
+struct Worktree {
     #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub branch: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub struct Agent {
+struct Agent {
     #[serde(default)]
-    pub name: Option<String>,
+    name: Option<String>,
 }
 
 pub fn statusline() -> String {
@@ -103,7 +101,7 @@ pub fn statusline() -> String {
     render(&input)
 }
 
-pub fn render(input: &StatusInput) -> String {
+fn render(input: &StatusInput) -> String {
     let model_display = if let Some(ref model) = input.model.display_name {
         let style_suffix = match input.output_style.name {
             Some(ref style) => format!(" {GRAY}({style}){RESET}"),
@@ -175,7 +173,7 @@ pub fn render(input: &StatusInput) -> String {
         String::new()
     };
 
-    let display_dir = format!("{} ", fish_shorten_path(current_dir));
+    let display_dir = fish_shorten_path(current_dir);
 
     let lines_changed = if let Some(ref cost) = input.cost {
         let added = cost.total_lines_added;
@@ -253,27 +251,22 @@ pub fn render(input: &StatusInput) -> String {
         )
     };
 
-    if !branch.is_empty() {
-        if display_dir.is_empty() {
-            format!("{LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}")
-        } else {
-            format!(
-                "{CYAN}{}{RESET} {LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}",
-                display_dir.trim_end()
-            )
-        }
+    if branch.is_empty() {
+        format!("{CYAN}{display_dir}{RESET}{components_str}")
     } else {
-        format!("{CYAN}{}{RESET}{components_str}", display_dir.trim_end())
+        format!(
+            "{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2} {GREEN}{branch}{lines_changed}{RESET}{components_str}"
+        )
     }
 }
 
-pub fn read_input() -> Result<StatusInput, Box<dyn std::error::Error>> {
+fn read_input() -> Result<StatusInput, Box<dyn std::error::Error>> {
     let mut buffer = String::new();
     io::stdin().read_to_string(&mut buffer)?;
     Ok(serde_json::from_str(&buffer)?)
 }
 
-pub fn get_git_branch(working_dir: &str) -> String {
+fn get_git_branch(working_dir: &str) -> String {
     let output = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(working_dir)
@@ -287,7 +280,7 @@ pub fn get_git_branch(working_dir: &str) -> String {
     }
 }
 
-pub fn is_git_repo(dir: &str) -> bool {
+fn is_git_repo(dir: &str) -> bool {
     let output = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(dir)
@@ -297,11 +290,11 @@ pub fn is_git_repo(dir: &str) -> bool {
              String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
-pub fn home_dir() -> String {
+fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
 }
 
-pub fn format_cost(cost: f64) -> String {
+fn format_cost(cost: f64) -> String {
     if cost < 0.01 {
         format!("{:.3}", cost)
     } else {
@@ -309,7 +302,7 @@ pub fn format_cost(cost: f64) -> String {
     }
 }
 
-pub fn format_duration(ms: u64) -> String {
+fn format_duration(ms: u64) -> String {
     let total_secs = ms / 1000;
     let hours = total_secs / 3600;
     let minutes = (total_secs % 3600) / 60;
@@ -322,9 +315,13 @@ pub fn format_duration(ms: u64) -> String {
     }
 }
 
-pub fn fish_shorten_path(path: &str) -> String {
+fn fish_shorten_path(path: &str) -> String {
     let home = home_dir();
-    let path = path.replace(&home, "~");
+    let path = path
+        .strip_prefix(&home)
+        .filter(|_| !home.is_empty() && home != "/")
+        .map(|rest| format!("~{rest}"))
+        .unwrap_or_else(|| path.to_string());
 
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() <= 1 {
@@ -480,8 +477,7 @@ mod tests {
             "worktree": {"name": "feat", "branch": "feat-branch"},
             "agent": {"name": "reviewer"}
         }"#;
-        let input: StatusInput =
-            serde_json::from_str(json).expect("full JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(json).expect("full JSON should deserialize");
         assert_eq!(input.model.display_name.as_deref(), Some("Sonnet"));
         assert_eq!(
             input
@@ -496,11 +492,7 @@ mod tests {
             3.50
         );
         assert_eq!(
-            input
-                .cost
-                .as_ref()
-                .expect("cost present")
-                .total_duration_ms,
+            input.cost.as_ref().expect("cost present").total_duration_ms,
             Some(120000)
         );
         assert_eq!(
@@ -513,12 +505,7 @@ mod tests {
             Some("feat")
         );
         assert_eq!(
-            input
-                .agent
-                .as_ref()
-                .expect("agent present")
-                .name
-                .as_deref(),
+            input.agent.as_ref().expect("agent present").name.as_deref(),
             Some("reviewer")
         );
     }
@@ -553,9 +540,8 @@ mod tests {
 
     #[test]
     fn statusline_non_git_dir() {
-        let input: StatusInput =
-            serde_json::from_str(r#"{"workspace": {"current_dir": "/tmp"}}"#)
-                .expect("non-git dir JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(r#"{"workspace": {"current_dir": "/tmp"}}"#)
+            .expect("non-git dir JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("/tmp"));
         // No branch indicator for non-git dirs
@@ -565,8 +551,7 @@ mod tests {
     #[test]
     fn statusline_with_model() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}}"#;
-        let input: StatusInput =
-            serde_json::from_str(json).expect("model JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(json).expect("model JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("Opus"));
     }
@@ -578,8 +563,7 @@ mod tests {
             "model": {"display_name": "Opus"},
             "output_style": {"name": "concise"}
         }"#;
-        let input: StatusInput =
-            serde_json::from_str(json).expect("style JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(json).expect("style JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("Opus"));
         assert!(output.contains("concise"));
@@ -591,8 +575,7 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5}
         }"#;
-        let input: StatusInput =
-            serde_json::from_str(json).expect("cost JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(json).expect("cost JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("3.50"));
         assert!(output.contains("2m"));
@@ -617,8 +600,7 @@ mod tests {
     #[test]
     fn statusline_with_agent() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "agent": {"name": "code-reviewer"}}"#;
-        let input: StatusInput =
-            serde_json::from_str(json).expect("agent JSON should deserialize");
+        let input: StatusInput = serde_json::from_str(json).expect("agent JSON should deserialize");
         let output = build_statusline_from(&input);
         assert!(output.contains("code-reviewer"));
     }

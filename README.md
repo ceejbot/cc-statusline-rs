@@ -11,11 +11,12 @@ Idea from https://gist.github.com/steipete/8396e512171d31e934f0013e5651691e.
 ### Prerequisites
 
 - Rust (install from [rustup.rs](https://rustup.rs/))
+- [just](https://just.systems/) (`brew install just`)
 
 ### Install
 
 ```bash
-git clone https://github.com/khoi/cc-statusline-rs && cd cc-statusline-rs && make install
+git clone https://github.com/ceejbot/cc-statusline-rs && cd cc-statusline-rs && just install
 ```
 
 The installation automatically configures your `~/.claude/settings.json` with the statusline.
