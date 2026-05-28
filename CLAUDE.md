@@ -33,7 +33,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 `StatusInput` is the top-level serde struct. All fields use `#[serde(default)]` so missing fields deserialize gracefully.
 
 | Struct | Key Fields | Purpose |
-|--------|-----------|---------|
+|--------|------------|---------|
 | `StatusInput` | workspace, model, output_style, context_window, cost, worktree, agent, effort, thinking, vim, rate_limits | Top-level container |
 | `Workspace` | `current_dir: Option<String>`, `git_worktree: Option<String>` | Working directory (required for meaningful output); `git_worktree` is set when cwd is in a linked git worktree |
 | `Model` | `display_name: Option<String>` | Model name shown in statusline; `" (1M context)"` is stripped |
@@ -43,7 +43,8 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 | `Cost` | `total_cost_usd`, `total_duration_ms`, `total_lines_added`, `total_lines_removed` | Session cost and line change stats |
 | `Worktree` | `name` | Worktree indicator |
 | `Agent` | `name: Option<String>` | Agent name when running as a sub-agent |
-| `Effort` | `level: Option<String>` | Reasoning effort suffix on model name (`·max`, `·xhigh`, `·low`, `·medium`); `high` is the default and is suppressed |
+| `Pr` | `number: Option<u64>`, `review_state: Option<String>` | Open PR badge glued to the git branch; present only inside a git repo with an open PR. `url` is ignored (not displayable) |
+| `Effort` | `level: Option<String>` | Reasoning effort suffix on model name (`·max`, `·ultra`, `·xhigh`, `·low`, `·medium`; `ultra` is the Opus 4.8 level); rendered generically for any value, with `high` (the default) suppressed |
 | `Thinking` | `enabled: bool` | When true, appends `✻` glyph to model name |
 | `Vim` | `mode: Option<String>` | Vim mode badge at the front of the line; maps `NORMAL/INSERT/VISUAL/VISUAL LINE` to `[N]/[I]/[V]/[V-L]` |
 | `RateLimits` | `five_hour`, `seven_day` (each `RateLimitWindow`) | Subscriber-only; absent for API users. Shown at the end of the line |
@@ -55,7 +56,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
 2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
-3. **Git branch**: Via a single `git status --porcelain=v2 --branch` call, colored green. Decorations append in this order: `*` (red, when dirty), `↑N` (ahead), `↓M` (behind), `↟name` (worktree, from `worktree.name` or falling back to `workspace.git_worktree`)
+3. **Git branch**: Via a single `git status --porcelain=v2 --branch` call, colored green. Decorations append in this order: `*` (red, when dirty), `↑N` (ahead), `↓M` (behind), `↟name` (worktree, from `worktree.name` or falling back to `workspace.git_worktree`), `#N` (PR badge, from `pr.number`, colored by `pr.review_state`: approved=green, changes_requested=red, pending=yellow, draft/absent=gray)
 4. **Lines changed**: `+N -M` from cost data, green/red, glued to the branch component
 5. **Model**: Nerd Font icon + model name in orange, with optional `·<effort>` suffix (`·max`, etc.; `high` suppressed), `✻` thinking glyph, and style suffix in gray
 6. **Context bar**: 15-char progress bar (█/░) + percentage, color-coded via `pct_color()` (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%); `┊` tick inserted at the 200k boundary when `context_window_size > 200000`
@@ -85,7 +86,7 @@ All internal; only `statusline()` is `pub`.
 ### Display Format
 
 ```
-[N] path  branch*↑2↓1 ↟worktree(+N -M) • 󰊭 Model·max✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
+[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
 ```
 
 Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, and rate limits all degrade to nothing when their fields aren't present in the JSON.

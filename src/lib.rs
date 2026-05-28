@@ -40,6 +40,8 @@ struct StatusInput {
     vim: Option<Vim>,
     #[serde(default)]
     rate_limits: Option<RateLimits>,
+    #[serde(default)]
+    pr: Option<Pr>,
 }
 
 #[derive(Deserialize, Default)]
@@ -104,6 +106,14 @@ struct Worktree {
 struct Agent {
     #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Pr {
+    #[serde(default)]
+    number: Option<u64>,
+    #[serde(default)]
+    review_state: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -267,6 +277,15 @@ fn render(input: &StatusInput) -> String {
             .filter(|n| !n.is_empty());
         if let Some(n) = worktree_name {
             s.push_str(&format!(" {GRAY}\u{219f}{n}{RESET}"));
+        }
+        if let Some(number) = input.pr.as_ref().and_then(|p| p.number) {
+            let color = match input.pr.as_ref().and_then(|p| p.review_state.as_deref()) {
+                Some("approved") => GREEN,
+                Some("changes_requested") => RED,
+                Some("pending") => YELLOW,
+                _ => GRAY, // draft, or absent review_state
+            };
+            s.push_str(&format!(" {color}\u{f407}#{number}{RESET}"));
         }
         s
     });
@@ -610,7 +629,8 @@ mod tests {
             "context_window": {"context_window_size": 200000, "used_percentage": 42.5},
             "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5},
             "worktree": {"name": "feat", "branch": "feat-branch"},
-            "agent": {"name": "reviewer"}
+            "agent": {"name": "reviewer"},
+            "pr": {"number": 99, "url": "https://example.com/pull/99", "review_state": "pending"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("full JSON should deserialize");
         assert_eq!(input.model.display_name.as_deref(), Some("Sonnet"));
@@ -643,6 +663,9 @@ mod tests {
             input.agent.as_ref().expect("agent present").name.as_deref(),
             Some("reviewer")
         );
+        let pr = input.pr.as_ref().expect("pr present");
+        assert_eq!(pr.number, Some(99));
+        assert_eq!(pr.review_state.as_deref(), Some("pending"));
     }
 
     #[test]
@@ -1021,5 +1044,74 @@ mod tests {
         let input: StatusInput = serde_json::from_str(json).expect("200k-window JSON deserializes");
         let output = build_statusline_from(&input);
         assert!(!output.contains('┊'));
+    }
+
+    // --- pr badge ---
+
+    #[test]
+    fn statusline_pr_badge_approved_green() {
+        // The badge is glued to the git branch, so use this repo's dir (a git repo).
+        let this_dir = env!("CARGO_MANIFEST_DIR");
+        let json = format!(
+            r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 1234, "review_state": "approved"}}}}"#
+        );
+        let input: StatusInput = serde_json::from_str(&json).expect("pr JSON should deserialize");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("#1234"));
+        let idx = output
+            .find("\u{f407}")
+            .expect("output should contain pr glyph");
+        assert!(output[..idx].ends_with(GREEN));
+    }
+
+    #[test]
+    fn statusline_pr_badge_changes_requested_red() {
+        let this_dir = env!("CARGO_MANIFEST_DIR");
+        let json = format!(
+            r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 7, "review_state": "changes_requested"}}}}"#
+        );
+        let input: StatusInput = serde_json::from_str(&json).expect("pr JSON should deserialize");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("#7"));
+        let idx = output
+            .find("\u{f407}")
+            .expect("output should contain pr glyph");
+        assert!(output[..idx].ends_with(RED));
+    }
+
+    #[test]
+    fn statusline_pr_badge_absent_renders_nothing() {
+        let this_dir = env!("CARGO_MANIFEST_DIR");
+        let json = format!(r#"{{"workspace": {{"current_dir": "{this_dir}"}}}}"#);
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("no-pr JSON should deserialize");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("\u{f407}"));
+    }
+
+    #[test]
+    fn statusline_pr_badge_no_number_hidden() {
+        let this_dir = env!("CARGO_MANIFEST_DIR");
+        let json = format!(
+            r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"review_state": "approved"}}}}"#
+        );
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("pr-without-number JSON should deserialize");
+        let output = build_statusline_from(&input);
+        assert!(!output.contains("\u{f407}"));
+    }
+
+    // --- effort: ultra (Opus 4.8) ---
+
+    #[test]
+    fn statusline_effort_ultra_shows_suffix() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "effort": {"level": "ultra"}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("Opus·ultra"));
     }
 }

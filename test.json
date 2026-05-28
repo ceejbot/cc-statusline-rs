@@ -3,8 +3,8 @@
 	"session_id": "abc123",
 	"cwd": "/path/to/current/cc-statusline-rs",
 	"model": {
-		"id": "claude-opus-4-7",
-		"display_name": "Opus 4.7 (1M context)"
+		"id": "claude-opus-4-8",
+		"display_name": "Opus 4.8 (1M context)"
 	},
 	"workspace": {
 		"current_dir": "/path/to/current/cc-statusline-rs",
@@ -15,7 +15,7 @@
 		"name": "explanatory"
 	},
 	"effort": {
-		"level": "max"
+		"level": "ultra"
 	},
 	"thinking": {
 		"enabled": true
@@ -58,5 +58,10 @@
 	},
 	"agent": {
 		"name": "code-reviewer"
+	},
+	"pr": {
+		"number": 1234,
+		"url": "https://github.com/example/repo/pull/1234",
+		"review_state": "approved"
 	}
 }
