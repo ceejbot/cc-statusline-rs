@@ -38,6 +38,18 @@ run:
 clean:
     @cargo clean
 
+# Tag a new version for release.
+version BUMP:
+    #!/usr/bin/env bash
+    set -e
+    current=$(tomato get package.version Cargo.toml)
+    version=$(semver-bump {{ BUMP }} $current)
+    tomato set package.version "$version" Cargo.toml &> /dev/null
+    cargo generate-lockfile
+    git commit Cargo.toml Cargo.lock -m "v${version}"
+    git tag "v${version}"
+    printf "Release tagged for version {{ BOLD_YELLOW }}v${version}{{ RESET }}\n"
+
 # Build, sign, install to ~/.claude/, and configure settings.json
 install:
     #!/usr/bin/env bash
@@ -59,3 +71,11 @@ install:
         echo "created $settings"
     fi
     echo "installed to ~/.claude/cc-statusline-rs"
+
+# Install tools
+setup:
+    brew tap ceejbot/homebrew-tap
+    brew install tomato semver-bump jq
+
+RESET := "\\e[0m"
+BOLD_YELLOW := "\\e[1;33m"
