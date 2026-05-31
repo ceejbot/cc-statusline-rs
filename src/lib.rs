@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::io::{self, Read};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ANSI color constants
 const RESET: &str = "\x1b[0m";
@@ -15,137 +16,119 @@ const LIGHT_BLUE: &str = "\x1b[38;5;12m";
 const LIGHT_MAGENTA: &str = "\x1b[38;5;13m";
 const GOLD: &str = "\x1b[38;5;3m";
 
-// Typed serde structs for JSON input
+// Typed serde structs for JSON input.
+// Container-level `#[serde(default)]` fills any missing field from the struct's
+// `Default`, so partial/empty JSON deserializes gracefully without per-field attrs.
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct StatusInput {
-    #[serde(default)]
     workspace: Workspace,
-    #[serde(default)]
     model: Model,
-    #[serde(default)]
     output_style: OutputStyle,
-    #[serde(default)]
     context_window: Option<ContextWindow>,
-    #[serde(default)]
     cost: Option<Cost>,
-    #[serde(default)]
     worktree: Option<Worktree>,
-    #[serde(default)]
     agent: Option<Agent>,
-    #[serde(default)]
     effort: Option<Effort>,
-    #[serde(default)]
     thinking: Option<Thinking>,
-    #[serde(default)]
     vim: Option<Vim>,
-    #[serde(default)]
     rate_limits: Option<RateLimits>,
-    #[serde(default)]
     pr: Option<Pr>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Workspace {
-    #[serde(default)]
     current_dir: Option<String>,
-    #[serde(default)]
     git_worktree: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Model {
-    #[serde(default)]
     display_name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct OutputStyle {
-    #[serde(default)]
     name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct ContextWindow {
-    #[serde(default)]
     context_window_size: u64,
-    #[serde(default)]
     used_percentage: Option<f64>,
-    #[serde(default)]
     current_usage: Option<CurrentUsage>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct CurrentUsage {
-    #[serde(default)]
     input_tokens: u64,
-    #[serde(default)]
     cache_creation_input_tokens: u64,
-    #[serde(default)]
     cache_read_input_tokens: u64,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Cost {
-    #[serde(default)]
     total_cost_usd: f64,
-    #[serde(default)]
     total_duration_ms: Option<u64>,
-    #[serde(default)]
     total_lines_added: u64,
-    #[serde(default)]
     total_lines_removed: u64,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Worktree {
-    #[serde(default)]
     name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Agent {
-    #[serde(default)]
     name: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Pr {
-    #[serde(default)]
     number: Option<u64>,
-    #[serde(default)]
     review_state: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Effort {
-    #[serde(default)]
     level: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Thinking {
-    #[serde(default)]
     enabled: bool,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct Vim {
-    #[serde(default)]
     mode: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct RateLimits {
-    #[serde(default)]
     five_hour: Option<RateLimitWindow>,
-    #[serde(default)]
     seven_day: Option<RateLimitWindow>,
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default)]
 struct RateLimitWindow {
-    #[serde(default)]
     used_percentage: f64,
+    resets_at: Option<u64>, // Unix epoch seconds; absent until the window has usage
 }
 
 pub fn statusline() -> String {
@@ -239,11 +222,25 @@ fn render(input: &StatusInput) -> String {
         .rate_limits
         .as_ref()
         .map(|rl| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             let mut parts = Vec::new();
             for (label, win) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
                 if let Some(w) = win {
+                    // Surface the reset countdown only once a window starts to
+                    // matter (>=50%, the first non-gray pct_color band) and only
+                    // when resets_at is present and still in the future.
+                    let reset = w
+                        .resets_at
+                        .filter(|_| w.used_percentage >= 50.0)
+                        .map(|at| at.saturating_sub(now))
+                        .filter(|&remaining| remaining > 0)
+                        .map(|remaining| format!("{GRAY}·{}{RESET}", format_reset(remaining)))
+                        .unwrap_or_default();
                     parts.push(format!(
-                        "{GRAY}{label} {}{}%{RESET}",
+                        "{GRAY}{label} {}{}%{RESET}{reset}",
                         pct_color(w.used_percentage),
                         w.used_percentage.round() as u32
                     ));
@@ -469,6 +466,24 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
+/// Day-aware countdown for a rate-limit window reset. Unlike `format_duration`
+/// (which renders `167h 0m` for multi-day spans), this rolls into days so the
+/// 7-day window reads as e.g. `2d 5h`.
+fn format_reset(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let minutes = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        "<1m".to_string()
+    }
+}
+
 fn fish_shorten_path(path: &str) -> String {
     let home = home_dir();
     let path = path
@@ -552,6 +567,32 @@ mod tests {
         assert_eq!(format_duration(3_600_000), "1h 0m");
         assert_eq!(format_duration(5_400_000), "1h 30m");
         assert_eq!(format_duration(7_200_000), "2h 0m");
+    }
+
+    // --- format_reset ---
+
+    #[test]
+    fn format_reset_under_one_minute() {
+        assert_eq!(format_reset(0), "<1m");
+        assert_eq!(format_reset(59), "<1m");
+    }
+
+    #[test]
+    fn format_reset_minutes_only() {
+        assert_eq!(format_reset(90), "1m");
+        assert_eq!(format_reset(3_540), "59m");
+    }
+
+    #[test]
+    fn format_reset_hours_and_minutes() {
+        assert_eq!(format_reset(3_600 + 1_800), "1h 30m");
+        assert_eq!(format_reset(4 * 3_600 + 12 * 60), "4h 12m");
+    }
+
+    #[test]
+    fn format_reset_days_and_hours() {
+        assert_eq!(format_reset(2 * 86_400 + 5 * 3_600), "2d 5h");
+        assert_eq!(format_reset(6 * 86_400 + 23 * 3_600), "6d 23h");
     }
 
     // --- fish_shorten_path ---
@@ -1010,6 +1051,67 @@ mod tests {
         assert!(output.contains("79%"));
         assert!(output.contains("7d"));
         assert!(output.contains("34%"));
+    }
+
+    fn epoch_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn statusline_rate_limits_countdown_shown_when_high() {
+        // >=50% with a future resets_at (~2h12m out) → countdown appears. The +30s
+        // buffer keeps the minute field stable against the seconds elapsed between
+        // computing the timestamp and render() reading the clock.
+        let resets_at = epoch_now() + 2 * 3_600 + 12 * 60 + 30;
+        let json = format!(
+            r#"{{
+                "workspace": {{"current_dir": "/tmp"}},
+                "rate_limits": {{"five_hour": {{"used_percentage": 78.5, "resets_at": {resets_at}}}}}
+            }}"#
+        );
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("rate-limits JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("2h 12m"));
+    }
+
+    #[test]
+    fn statusline_rate_limits_countdown_gated_below_threshold() {
+        // <50% with a future resets_at → countdown suppressed.
+        let resets_at = epoch_now() + 2 * 3_600;
+        let json = format!(
+            r#"{{
+                "workspace": {{"current_dir": "/tmp"}},
+                "rate_limits": {{"seven_day": {{"used_percentage": 34, "resets_at": {resets_at}}}}}
+            }}"#
+        );
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("rate-limits JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("34%"));
+        assert!(!output.contains("2h"));
+    }
+
+    #[test]
+    fn statusline_rate_limits_countdown_omitted_when_past() {
+        // >=50% but resets_at already elapsed → countdown omitted.
+        let resets_at = epoch_now().saturating_sub(3_600);
+        let json = format!(
+            r#"{{
+                "workspace": {{"current_dir": "/tmp"}},
+                "rate_limits": {{"five_hour": {{"used_percentage": 88, "resets_at": {resets_at}}}}}
+            }}"#
+        );
+        let input: StatusInput =
+            serde_json::from_str(&json).expect("rate-limits JSON deserializes");
+        let output = build_statusline_from(&input);
+        assert!(output.contains("88%"));
+        // The countdown renders as `<pct>%{RESET}{GRAY}·<dur>`; that signature must
+        // be absent when the window has already reset.
+        assert!(!output.contains(&format!("%{RESET}{GRAY}\u{b7}")));
     }
 
     #[test]

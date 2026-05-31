@@ -48,7 +48,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 | `Thinking` | `enabled: bool` | When true, appends `✻` glyph to model name |
 | `Vim` | `mode: Option<String>` | Vim mode badge at the front of the line; maps `NORMAL/INSERT/VISUAL/VISUAL LINE` to `[N]/[I]/[V]/[V-L]` |
 | `RateLimits` | `five_hour`, `seven_day` (each `RateLimitWindow`) | Subscriber-only; absent for API users. Shown at the end of the line |
-| `RateLimitWindow` | `used_percentage: f64` | Color-coded with the same thresholds as the context bar |
+| `RateLimitWindow` | `used_percentage: f64`, `resets_at: Option<u64>` | `used_percentage` color-coded with the same thresholds as the context bar. `resets_at` is a Unix epoch (seconds); rendered as a relative countdown, but only when the window is ≥50% used and the reset is still in the future |
 
 ### Statusline Assembly
 
@@ -63,7 +63,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 7. **Cost**: Dollar amount, color-coded (green <$5, yellow <$20, red ≥$20)
 8. **Agent**: Agent name in gray with icon
 9. **Duration**: Formatted as `Nh Mm` or `<1m`, from `total_duration_ms`
-10. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`
+10. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`. Each window appends a gray reset countdown (e.g. `·2h 12m`, day-aware as `·5d 2h`) glued to its percentage, shown only when that window is ≥50% used and `resets_at` is in the future (a stale/elapsed timestamp degrades to no countdown)
 
 ### ANSI Colors
 
@@ -82,11 +82,12 @@ All internal; only `statusline()` is `pub`.
 - `pct_color(f64)` — Maps a percentage to one of red/orange/yellow/gray; shared by context bar and rate limits
 - `format_cost(f64)` — 3 decimal places below $0.01, 2 above
 - `format_duration(ms)` — Formats milliseconds as `Nh Mm`, `Nm`, or `<1m`
+- `format_reset(secs)` — Day-aware rate-limit reset countdown: `Nd Nh`, `Nh Mm`, `Nm`, or `<1m` (rolls into days, unlike `format_duration`)
 
 ### Display Format
 
 ```
-[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78% · 7d 34%
+[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78%·2h 12m · 7d 34%
 ```
 
 Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, and rate limits all degrade to nothing when their fields aren't present in the JSON.
