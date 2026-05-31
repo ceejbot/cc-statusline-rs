@@ -8,7 +8,7 @@ name = "cc_statusline_rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "statusline"
+name = "cc-statusline-rs"
 path = "src/main.rs"
 
 [dependencies]

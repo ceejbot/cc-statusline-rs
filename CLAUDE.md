@@ -100,3 +100,7 @@ Components are suppressed when their data is absent: vim badge, effort suffix, t
 ## Input Format
 
 JSON on stdin. See `test.json` for the full structure. Only `workspace.current_dir` is required for meaningful output; all other fields are optional and degrade gracefully when absent.
+
+## Project memory
+
+This project uses the trivia MCP. All memories are tagged `project:cc-statusline-rs`. Recall by that tag at the start of work. Add new lessons via the `session-retro` skill.

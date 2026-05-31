@@ -56,7 +56,7 @@ install:
     set -euo pipefail
     cargo build --release
     mkdir -p ~/.claude
-    cp target/release/statusline ~/.claude/cc-statusline-rs
+    cp target/release/cc-statusline-rs ~/.claude/cc-statusline-rs
     chmod +x ~/.claude/cc-statusline-rs
     xattr -cr ~/.claude/cc-statusline-rs
     codesign -fs - ~/.claude/cc-statusline-rs
