@@ -1,42 +1,26 @@
-# Build release binary
-build:
-    @cargo build --release
-
-# Quick type/syntax check
-check:
-    @cargo check
-
-# Run all unit tests
-test:
-    @cargo test
-
-# Format code
-fmt:
-    @cargo fmt
+# list recipes
+_help:
+    just --list
 
 # Run clippy lints
-lint:
-    @cargo clippy
+@clippy:
+    cargo clippy --all-targets -- -D warnings
+
+# Run all unit tests
+@test:
+    cargo nextest run --workspace --all-targets --future-incompat-report
+
+# Format code
+@fmt:
+    cargo +nightly fmt
 
 # Run all CI checks: formatting, lints, tests
-ci:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "checking formatting..."
-    cargo fmt --check
-    echo "running clippy..."
-    cargo clippy -- -D warnings
-    echo "running tests..."
-    cargo test
-    echo "all checks passed."
+ci: test clippy
+    cargo +nightly fmt --check
 
 # Run with test.json for quick manual testing
 run:
     @cargo run < test.json
-
-# Clean build artifacts
-clean:
-    @cargo clean
 
 # Tag a new version for release.
 version BUMP:

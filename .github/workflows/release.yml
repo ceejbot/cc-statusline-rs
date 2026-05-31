@@ -1,6 +1,7 @@
+---
 name: release
 permissions:
-    contents: write
+    contents: read
 
 on:
     push:
@@ -22,13 +23,17 @@ env:
 
 jobs:
     preflight:
+        permissions:
+            contents: write
         name: preflight
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                persist-credentials: false
 
             - name: get stable + nightly Rust
-              uses: actions-rust-lang/setup-rust-toolchain@v1
+              uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
               with:
                   toolchain: nightly, stable
                   target: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
@@ -37,6 +42,7 @@ jobs:
                       ~/.cargo/registry
                       ~/.cargo/bin
                       target
+                  cache: false
 
             - name: consult Clippy
               run: cargo +stable clippy --all-targets
@@ -47,11 +53,13 @@ jobs:
             - name: set ref_name
               shell: bash
               run: |
-                if [ -n "${{ inputs.ref_name }}" ]; then
-                  echo "REF_NAME=${{ inputs.ref_name }}" >> $GITHUB_ENV
+                if [ -n "${INPUTS_REF_NAME}" ]; then
+                  echo "REF_NAME=${INPUTS_REF_NAME}" >> $GITHUB_ENV
                 else
-                  echo "REF_NAME=${{ github.ref_name }}" >> $GITHUB_ENV
+                  echo "REF_NAME=${GITHUB_REF_NAME}" >> $GITHUB_ENV
                 fi
+              env:
+                INPUTS_REF_NAME: ${{ inputs.ref_name }}
 
             - name: create github release
               continue-on-error: true # for testing
@@ -64,10 +72,11 @@ jobs:
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  INPUTS_REF_NAME: ${{ inputs.ref_name }}
               run: |
-                  REF_NAME="${{ github.ref_name }}"
-                  if [ -n "${{ inputs.ref_name }}" ]; then
-                      REF_NAME="${{ inputs.ref_name }}"
+                  REF_NAME="${GITHUB_REF_NAME}"
+                  if [ -n "${INPUTS_REF_NAME}" ]; then
+                      REF_NAME="${INPUTS_REF_NAME}"
                   fi
                   cargo +stable build --release
                   tar czf cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz --strip-components=2  target/release/cc-statusline-rs
@@ -75,14 +84,18 @@ jobs:
 
 
     release-macos:
+        permissions:
+            contents: write
         name: release-macos
         runs-on: macos-latest
         needs: preflight
         steps:
-            - uses: actions/checkout@v5
+            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+              with:
+                persist-credentials: false
 
             - name: get stable Rust
-              uses: actions-rust-lang/setup-rust-toolchain@v1
+              uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
               with:
                   toolchain: stable
                   target: aarch64-apple-darwin
@@ -90,6 +103,7 @@ jobs:
                       ~/.cargo/registry
                       ~/.cargo/bin
                       target
+                  cache: false
 
             - name: build for release
               run: |
@@ -98,10 +112,11 @@ jobs:
             - name: upload release assets
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  INPUTS_REF_NAME: ${{ inputs.ref_name }}
               run: |
-                  REF_NAME="${{ github.ref_name }}"
-                  if [ -n "${{ inputs.ref_name }}" ]; then
-                      REF_NAME="${{ inputs.ref_name }}"
+                  REF_NAME="${GITHUB_REF_NAME}"
+                  if [ -n "${INPUTS_REF_NAME}" ]; then
+                      REF_NAME="${INPUTS_REF_NAME}"
                   fi
                   target=aarch64-apple-darwin
                   mkdir -p dist
