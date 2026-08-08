@@ -45,7 +45,7 @@ jobs:
                   cache: false
 
             - name: consult Clippy
-              run: cargo +stable clippy --all-targets
+              run: cargo +stable clippy --all-targets -- -D warnings
 
             - name: check formatting
               run: cargo +nightly fmt --check --all

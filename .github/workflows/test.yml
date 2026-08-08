@@ -36,14 +36,33 @@ jobs:
                 ~/.cargo/bin
                 target
 
+        # pinned to a specific nextest version; bump deliberately
         - name: get cargo-nextest on path
           run: |
-            curl -sL https://get.nexte.st/latest/linux -o nextest.tgz
+            curl -sL https://get.nexte.st/0.9.143/linux -o nextest.tgz
             tar xfz nextest.tgz
             mv cargo-nextest /home/runner/.cargo/bin
 
         - name: run the tests
           run: cargo nextest run
+
+    clippy:
+        name: clippy
+        runs-on: ubuntu-latest
+        steps:
+        - name: checkout
+          uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+          with:
+            persist-credentials: false
+
+        - name: get stable Rust
+          uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
+          with:
+            toolchain: stable
+            components: clippy
+
+        - name: consult Clippy
+          run: cargo clippy --all-targets -- -D warnings
 
     fmt:
         name: formatting check

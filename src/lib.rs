@@ -134,75 +134,77 @@ struct RateLimitWindow {
     resets_at: Option<u64>, // Unix epoch seconds; absent until the window has usage
 }
 
+/// Read the Claude Code status-hook JSON from stdin and return the assembled
+/// ANSI statusline. Malformed or empty input degrades to defaults rather than
+/// failing — a statusline should never error out of a prompt.
 pub fn statusline() -> String {
     let input = read_input().unwrap_or_default();
     render(&input)
 }
 
-fn render(input: &StatusInput) -> String {
-    let model_display = if let Some(ref model) = input.model.display_name {
-        let model = model.replace(" (1M context)", "");
-        let effort_suffix = input
-            .effort
+fn model_display(input: &StatusInput) -> String {
+    let Some(ref model) = input.model.display_name else {
+        return String::new();
+    };
+    let model = model.replace(" (1M context)", "");
+    let effort_suffix = input
+        .effort
+        .as_ref()
+        .and_then(|e| e.level.as_deref())
+        .filter(|&l| l != "high")
+        .map(|l| format!("·{l}"))
+        .unwrap_or_default();
+    let thinking_glyph = if input.thinking.as_ref().is_some_and(|t| t.enabled) {
+        "✻"
+    } else {
+        ""
+    };
+    let style_suffix = match input.output_style.name {
+        Some(ref style) => format!(" {GRAY}({style}){RESET}"),
+        None => String::new(),
+    };
+    format!("{LIGHT_CYAN}\u{e26d} {ORANGE}{model}{effort_suffix}{thinking_glyph}{style_suffix}")
+}
+
+fn context_display(ctx: &ContextWindow) -> String {
+    // Use API-provided percentage when available, fall back to manual calculation
+    let pct = if let Some(api_pct) = ctx.used_percentage {
+        api_pct.min(100.0)
+    } else {
+        let window_size = ctx.context_window_size;
+        let used = ctx
+            .current_usage
             .as_ref()
-            .and_then(|e| e.level.as_deref())
-            .filter(|&l| l != "high")
-            .map(|l| format!("·{l}"))
-            .unwrap_or_default();
-        let thinking_glyph = if input.thinking.as_ref().is_some_and(|t| t.enabled) {
-            "✻"
+            .map(|u| u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens)
+            .unwrap_or(0);
+        if window_size > 0 {
+            ((used as f64 * 100.0) / window_size as f64).min(100.0)
         } else {
-            ""
-        };
-        let style_suffix = match input.output_style.name {
-            Some(ref style) => format!(" {GRAY}({style}){RESET}"),
-            None => String::new(),
-        };
-        format!("{LIGHT_CYAN}\u{e26d} {ORANGE}{model}{effort_suffix}{thinking_glyph}{style_suffix}")
-    } else {
-        String::new()
-    };
-
-    let context_display = if let Some(ref ctx) = input.context_window {
-        // Use API-provided percentage when available, fall back to manual calculation
-        let pct = if let Some(api_pct) = ctx.used_percentage {
-            api_pct.min(100.0)
-        } else {
-            let window_size = ctx.context_window_size;
-            let used = ctx
-                .current_usage
-                .as_ref()
-                .map(|u| u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens)
-                .unwrap_or(0);
-            if window_size > 0 {
-                ((used as f64 * 100.0) / window_size as f64).min(100.0)
-            } else {
-                0.0
-            }
-        };
-
-        let bar_width: usize = 15;
-        let filled = ((pct * bar_width as f64 / 100.0).round() as usize).min(bar_width);
-        // Tick the 200k boundary when the window is larger than 200k.
-        let tick_at = (ctx.context_window_size > 200_000)
-            .then(|| ((200_000.0 * bar_width as f64) / ctx.context_window_size as f64).round() as usize);
-        let mut bar = String::new();
-        for i in 0..bar_width {
-            if Some(i) == tick_at {
-                bar.push('┊');
-            }
-            bar.push(if i < filled { '\u{2588}' } else { '\u{2591}' });
+            0.0
         }
-
-        format!(
-            "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {}{}%{RESET}",
-            pct_color(pct),
-            pct.round() as u32
-        )
-    } else {
-        String::new()
     };
 
+    let bar_width: usize = 15;
+    let filled = ((pct * bar_width as f64 / 100.0).round() as usize).min(bar_width);
+    // Tick the 200k boundary when the window is larger than 200k.
+    let tick_at = (ctx.context_window_size > 200_000)
+        .then(|| ((200_000.0 * bar_width as f64) / ctx.context_window_size as f64).round() as usize);
+    let mut bar = String::new();
+    for i in 0..bar_width {
+        if Some(i) == tick_at {
+            bar.push('┊');
+        }
+        bar.push(if i < filled { '\u{2588}' } else { '\u{2591}' });
+    }
+
+    format!(
+        "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {}{}%{RESET}",
+        pct_color(pct),
+        pct.round() as u32
+    )
+}
+
+fn render(input: &StatusInput) -> String {
     let vim_display = input
         .vim
         .as_ref()
@@ -348,28 +350,18 @@ fn render(input: &StatusInput) -> String {
         })
         .unwrap_or_default();
 
-    let mut components = Vec::new();
-    if !model_display.is_empty() {
-        components.push(model_display);
-    }
-    if !context_display.is_empty() {
-        components.push(context_display);
-    }
-    if !cost_display.is_empty() {
-        components.push(cost_display);
-    }
-    if !agent_display.is_empty() {
-        components.push(agent_display);
-    }
-    if !duration_display.is_empty() {
-        components.push(duration_display);
-    }
-    if !rate_limits_display.is_empty() {
-        components.push(rate_limits_display);
-    }
-    if !cache_break_display.is_empty() {
-        components.push(cache_break_display);
-    }
+    let components: Vec<String> = [
+        model_display(input),
+        input.context_window.as_ref().map(context_display).unwrap_or_default(),
+        cost_display,
+        agent_display,
+        duration_display,
+        rate_limits_display,
+        cache_break_display,
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect();
 
     let components_str = if components.is_empty() {
         String::new()
@@ -620,6 +612,9 @@ fn fish_shorten_path(path: &str) -> String {
     let path = path
         .strip_prefix(&home)
         .filter(|_| !home.is_empty() && home != "/")
+        // Guard the component boundary: /Users/ceejbackup must not become
+        // ~backup just because it shares a string prefix with /Users/ceej.
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
         .map(|rest| format!("~{rest}"))
         .unwrap_or_else(|| path.to_string());
 
@@ -761,6 +756,17 @@ mod tests {
     #[test]
     fn fish_shorten_tilde_preserved() {
         assert_eq!(fish_shorten_path("~/code/project"), "~/c/project");
+    }
+
+    #[test]
+    fn fish_shorten_home_sibling_not_collapsed() {
+        // /Users/ceejbackup shares a string prefix with /Users/ceej but is not
+        // inside home; it must not render with a tilde.
+        let home = home_dir();
+        let path = format!("{home}extra/project");
+        let shortened = fish_shorten_path(&path);
+        assert!(!shortened.starts_with('~'));
+        assert!(shortened.ends_with("project"));
     }
 
     // --- detect_ttl ---
@@ -1008,14 +1014,10 @@ mod tests {
 
     // --- statusline integration tests ---
 
-    fn build_statusline_from(input: &StatusInput) -> String {
-        render(input)
-    }
-
     #[test]
     fn statusline_missing_workspace() {
         let input = StatusInput::default();
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("missing workspace.current_dir"));
     }
 
@@ -1023,7 +1025,7 @@ mod tests {
     fn statusline_non_git_dir() {
         let input: StatusInput = serde_json::from_str(r#"{"workspace": {"current_dir": "/tmp"}}"#)
             .expect("non-git dir JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("/tmp"));
         // No branch indicator for non-git dirs
         assert!(!output.contains("\u{f02a2}"));
@@ -1033,7 +1035,7 @@ mod tests {
     fn statusline_with_model() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("model JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("Opus"));
     }
 
@@ -1045,7 +1047,7 @@ mod tests {
             "output_style": {"name": "concise"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("style JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("Opus"));
         assert!(output.contains("concise"));
     }
@@ -1057,7 +1059,7 @@ mod tests {
             "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("cost JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("3.50"));
         assert!(output.contains("2m"));
         // lines_changed only shown next to git branch; /tmp is not a git repo
@@ -1072,7 +1074,7 @@ mod tests {
             r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "cost": {{"total_cost_usd": 1.00, "total_lines_added": 10, "total_lines_removed": 5}}}}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("git repo JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("+10"));
         assert!(output.contains("-5"));
     }
@@ -1081,7 +1083,7 @@ mod tests {
     fn statusline_with_agent() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "agent": {"name": "code-reviewer"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("agent JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("code-reviewer"));
     }
 
@@ -1092,7 +1094,7 @@ mod tests {
             "context_window": {"context_window_size": 200000, "used_percentage": 95.0}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("high context JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("95%"));
         assert!(output.contains(RED));
     }
@@ -1104,7 +1106,7 @@ mod tests {
             "context_window": {"context_window_size": 200000, "used_percentage": 20.0}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("low context JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("20%"));
         // Gray is used for low percentages — check the percentage is colored gray
         // The output has the pattern: {pct_color}20%{RESET}
@@ -1123,7 +1125,7 @@ mod tests {
             }
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("fallback context JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         // (30000+10000+10000)/100000 = 50%
         assert!(output.contains("50%"));
     }
@@ -1135,7 +1137,7 @@ mod tests {
             "cost": {"total_cost_usd": 0.0}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("zero cost JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         // The dollar sign icon should not appear for zero cost
         assert!(!output.contains("\u{f155}"));
     }
@@ -1144,7 +1146,7 @@ mod tests {
     fn statusline_empty_agent_hidden() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "agent": {"name": ""}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("empty agent JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         // Agent icon should not appear for empty name
         assert!(!output.contains("\u{f06a9}"));
     }
@@ -1159,7 +1161,7 @@ mod tests {
             "effort": {"level": "max"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("Opus·max"));
     }
 
@@ -1171,7 +1173,7 @@ mod tests {
             "effort": {"level": "high"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("·high"));
         assert!(output.contains("Opus"));
     }
@@ -1184,7 +1186,7 @@ mod tests {
             "thinking": {"enabled": true}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("thinking JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("✻"));
     }
 
@@ -1196,7 +1198,7 @@ mod tests {
             "thinking": {"enabled": false}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("thinking-disabled JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("✻"));
     }
 
@@ -1207,7 +1209,7 @@ mod tests {
             "model": {"display_name": "Opus 4.7 (1M context)"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("model-with-suffix JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("Opus 4.7"));
         assert!(!output.contains("(1M context)"));
     }
@@ -1218,7 +1220,7 @@ mod tests {
     fn statusline_vim_normal_renders_n() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "vim": {"mode": "NORMAL"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("vim JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("[N]"));
     }
 
@@ -1226,7 +1228,7 @@ mod tests {
     fn statusline_vim_insert_renders_i() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}, "vim": {"mode": "INSERT"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("vim JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("[I]"));
     }
 
@@ -1234,7 +1236,7 @@ mod tests {
     fn statusline_vim_absent_renders_nothing() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("no-vim JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("[N]"));
         assert!(!output.contains("[I]"));
     }
@@ -1251,7 +1253,7 @@ mod tests {
             }
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("rate-limits JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("5h"));
         assert!(output.contains("79%"));
         assert!(output.contains("7d"));
@@ -1278,7 +1280,7 @@ mod tests {
             }}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("rate-limits JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("2h 12m"));
     }
 
@@ -1293,7 +1295,7 @@ mod tests {
             }}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("rate-limits JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("34%"));
         assert!(!output.contains("2h"));
     }
@@ -1309,7 +1311,7 @@ mod tests {
             }}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("rate-limits JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("88%"));
         // The countdown renders as `<pct>%{RESET}{GRAY}·<dur>`; that signature must
         // be absent when the window has already reset.
@@ -1320,7 +1322,7 @@ mod tests {
     fn statusline_rate_limits_absent_renders_nothing() {
         let json = r#"{"workspace": {"current_dir": "/tmp"}}"#;
         let input: StatusInput = serde_json::from_str(json).expect("no-rate-limits JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("5h"));
         assert!(!output.contains("7d"));
     }
@@ -1334,7 +1336,7 @@ mod tests {
             "context_window": {"context_window_size": 1000000, "used_percentage": 22}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("1M-window JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains('┊'));
     }
 
@@ -1345,7 +1347,7 @@ mod tests {
             "context_window": {"context_window_size": 200000, "used_percentage": 50}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("200k-window JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains('┊'));
     }
 
@@ -1359,7 +1361,7 @@ mod tests {
             r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 1234, "review_state": "approved"}}}}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("pr JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("#1234"));
         let idx = output.find("\u{f407}").expect("output should contain pr glyph");
         assert!(output[..idx].ends_with(GREEN));
@@ -1372,7 +1374,7 @@ mod tests {
             r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 7, "review_state": "changes_requested"}}}}"#
         );
         let input: StatusInput = serde_json::from_str(&json).expect("pr JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("#7"));
         let idx = output.find("\u{f407}").expect("output should contain pr glyph");
         assert!(output[..idx].ends_with(RED));
@@ -1383,7 +1385,7 @@ mod tests {
         let this_dir = env!("CARGO_MANIFEST_DIR");
         let json = format!(r#"{{"workspace": {{"current_dir": "{this_dir}"}}}}"#);
         let input: StatusInput = serde_json::from_str(&json).expect("no-pr JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("\u{f407}"));
     }
 
@@ -1392,7 +1394,7 @@ mod tests {
         let this_dir = env!("CARGO_MANIFEST_DIR");
         let json = format!(r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"review_state": "approved"}}}}"#);
         let input: StatusInput = serde_json::from_str(&json).expect("pr-without-number JSON should deserialize");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(!output.contains("\u{f407}"));
     }
 
@@ -1406,7 +1408,7 @@ mod tests {
             "effort": {"level": "ultra"}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
-        let output = build_statusline_from(&input);
+        let output = render(&input);
         assert!(output.contains("Opus·ultra"));
     }
 }
