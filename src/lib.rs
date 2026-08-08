@@ -36,6 +36,7 @@ struct StatusInput {
     vim: Option<Vim>,
     rate_limits: Option<RateLimits>,
     pr: Option<Pr>,
+    transcript_path: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -251,6 +252,13 @@ fn render(input: &StatusInput) -> String {
         })
         .unwrap_or_default();
 
+    let cache_break_display = input
+        .transcript_path
+        .as_deref()
+        .and_then(|path| cache_status(path, input.rate_limits.is_some()))
+        .and_then(|(remaining, ttl)| cache_display(remaining, ttl))
+        .unwrap_or_default();
+
     let current_dir = match input.workspace.current_dir {
         Some(ref dir) => dir.as_str(),
         None => return format!("{RED}\u{f071} missing workspace.current_dir{RESET}"),
@@ -358,6 +366,9 @@ fn render(input: &StatusInput) -> String {
     }
     if !rate_limits_display.is_empty() {
         components.push(rate_limits_display);
+    }
+    if !cache_break_display.is_empty() {
+        components.push(cache_break_display);
     }
 
     let components_str = if components.is_empty() {
@@ -473,6 +484,134 @@ fn format_reset(secs: u64) -> String {
         format!("{minutes}m")
     } else {
         "<1m".to_string()
+    }
+}
+
+/// Prompt-cache TTL tier in effect for the session. The Anthropic prompt
+/// cache is a sliding window: each request refreshes it, and it expires this
+/// long after the last one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ttl {
+    FiveMin,
+    OneHour,
+}
+
+impl Ttl {
+    fn secs(self) -> u64 {
+        match self {
+            Ttl::FiveMin => 300,
+            Ttl::OneHour => 3600,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct CacheCreation {
+    ephemeral_5m_input_tokens: u64,
+    ephemeral_1h_input_tokens: u64,
+}
+
+/// Detect the TTL tier from a transcript tail by finding the most recent
+/// `"cache_creation"` usage object with a nonzero bucket. Occurrences of the
+/// phrase inside message text are quote-escaped in the JSONL (`\"...\"`), so
+/// the raw-quote needle only matches real usage fields.
+fn detect_ttl(tail: &str) -> Option<Ttl> {
+    let needle = "\"cache_creation\":";
+    let mut end = tail.len();
+    while let Some(pos) = tail[..end].rfind(needle) {
+        end = pos;
+        let rest = &tail[pos + needle.len()..];
+        // The value must be a small flat object right after the colon.
+        let Some(open) = rest.find('{').filter(|&o| rest[..o].trim().is_empty()) else {
+            continue;
+        };
+        let Some(close) = rest[open..].find('}') else {
+            continue;
+        };
+        if let Ok(cc) = serde_json::from_str::<CacheCreation>(&rest[open..=open + close]) {
+            if cc.ephemeral_1h_input_tokens > 0 {
+                return Some(Ttl::OneHour);
+            }
+            if cc.ephemeral_5m_input_tokens > 0 {
+                return Some(Ttl::FiveMin);
+            }
+        }
+    }
+    None
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == "1" || v == "true")
+}
+
+fn read_tail(path: &str, max_bytes: u64) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(max_bytes))).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Compute `(remaining_secs, ttl_secs)` for the prompt cache. Last activity
+/// is the transcript file's mtime; the TTL tier comes from transcript
+/// evidence, then env overrides, then a plan heuristic (rate limits are only
+/// sent for subscribers, who get the 1-hour cache). None means no indicator:
+/// caching disabled or transcript unreadable.
+fn cache_status(transcript_path: &str, has_rate_limits: bool) -> Option<(u64, u64)> {
+    if env_flag("DISABLE_PROMPT_CACHING") {
+        return None;
+    }
+    let mtime = std::fs::metadata(transcript_path).ok()?.modified().ok()?;
+    // A future mtime (clock skew) degrades to zero idle time.
+    let idle = SystemTime::now().duration_since(mtime).unwrap_or_default().as_secs();
+    let ttl = read_tail(transcript_path, 128 * 1024)
+        .and_then(|tail| detect_ttl(&tail))
+        .or_else(|| {
+            if env_flag("FORCE_PROMPT_CACHING_5M") {
+                Some(Ttl::FiveMin)
+            } else if env_flag("ENABLE_PROMPT_CACHING_1H") {
+                Some(Ttl::OneHour)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(if has_rate_limits { Ttl::OneHour } else { Ttl::FiveMin });
+    Some((ttl.secs().saturating_sub(idle), ttl.secs()))
+}
+
+/// Render the cache-break countdown. Hidden while more than a quarter of the
+/// TTL remains; escalates yellow/orange/red below 25%/10%/5%; a snowflake
+/// `cold` once the cache has expired (the next message pays a cache rewrite).
+fn cache_display(remaining_secs: u64, ttl_secs: u64) -> Option<String> {
+    if ttl_secs == 0 || remaining_secs * 4 >= ttl_secs {
+        return None;
+    }
+    if remaining_secs == 0 {
+        return Some(format!("{LIGHT_BLUE}\u{f0717} cold{RESET}"));
+    }
+    let color = if remaining_secs * 10 >= ttl_secs {
+        YELLOW
+    } else if remaining_secs * 20 >= ttl_secs {
+        ORANGE
+    } else {
+        RED
+    };
+    Some(format!(
+        "{color}\u{f051b} {}{RESET}",
+        format_cache_countdown(remaining_secs)
+    ))
+}
+
+/// Countdown text tuned to a 10s statusline refresh: minutes down to two
+/// minutes, whole seconds below that.
+fn format_cache_countdown(secs: u64) -> String {
+    if secs >= 120 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -622,6 +761,104 @@ mod tests {
     #[test]
     fn fish_shorten_tilde_preserved() {
         assert_eq!(fish_shorten_path("~/code/project"), "~/c/project");
+    }
+
+    // --- detect_ttl ---
+
+    #[test]
+    fn detect_ttl_one_hour() {
+        let tail = r#"{"usage":{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":4058}}}"#;
+        assert_eq!(detect_ttl(tail), Some(Ttl::OneHour));
+    }
+
+    #[test]
+    fn detect_ttl_five_min() {
+        let tail = r#"{"usage":{"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":200}}}"#;
+        assert_eq!(detect_ttl(tail), Some(Ttl::FiveMin));
+    }
+
+    #[test]
+    fn detect_ttl_uses_most_recent_nonzero() {
+        // Last occurrence has zero buckets (pure cache read); the earlier
+        // nonzero one decides.
+        let tail = concat!(
+            r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":99}}"#,
+            "\n",
+            r#"{"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0}}"#,
+        );
+        assert_eq!(detect_ttl(tail), Some(Ttl::OneHour));
+    }
+
+    #[test]
+    fn detect_ttl_absent() {
+        assert_eq!(detect_ttl(r#"{"message":{"role":"user"}}"#), None);
+        assert_eq!(detect_ttl(""), None);
+    }
+
+    #[test]
+    fn detect_ttl_ignores_escaped_text_mentions() {
+        // The phrase appearing inside message text is quote-escaped in JSONL
+        // and must not match.
+        let tail = r#"{"text":"transcripts record \"cache_creation\":{\"ephemeral_1h_input_tokens\":4058}"}"#;
+        assert_eq!(detect_ttl(tail), None);
+    }
+
+    #[test]
+    fn detect_ttl_malformed_object() {
+        assert_eq!(detect_ttl(r#""cache_creation": [1,2,3]"#), None);
+        assert_eq!(detect_ttl(r#""cache_creation":{"unterminated"#), None);
+    }
+
+    // --- cache_display ---
+
+    #[test]
+    fn cache_display_hidden_while_warm() {
+        assert!(cache_display(3600, 3600).is_none());
+        assert!(cache_display(900, 3600).is_none()); // exactly 25%
+        assert!(cache_display(75, 300).is_none());
+    }
+
+    #[test]
+    fn cache_display_bands_one_hour() {
+        let yellow = cache_display(899, 3600).expect("shown below 25%");
+        assert!(yellow.contains(YELLOW) && yellow.contains("14m"));
+        let orange = cache_display(300, 3600).expect("shown below 10%");
+        assert!(orange.contains(ORANGE) && orange.contains("5m"));
+        let red = cache_display(100, 3600).expect("shown below 5%");
+        assert!(red.contains(RED) && red.contains("100s"));
+    }
+
+    #[test]
+    fn cache_display_bands_five_min() {
+        let yellow = cache_display(74, 300).expect("shown below 25%");
+        assert!(yellow.contains(YELLOW) && yellow.contains("74s"));
+        let red = cache_display(10, 300).expect("shown below 5%");
+        assert!(red.contains(RED) && red.contains("10s"));
+    }
+
+    #[test]
+    fn cache_display_cold_after_expiry() {
+        let cold = cache_display(0, 3600).expect("cold state shown");
+        assert!(cold.contains(LIGHT_BLUE) && cold.contains("cold"));
+    }
+
+    #[test]
+    fn cache_display_zero_ttl_hidden() {
+        assert!(cache_display(0, 0).is_none());
+    }
+
+    // --- format_cache_countdown ---
+
+    #[test]
+    fn cache_countdown_minutes_above_two_minutes() {
+        assert_eq!(format_cache_countdown(720), "12m");
+        assert_eq!(format_cache_countdown(120), "2m");
+    }
+
+    #[test]
+    fn cache_countdown_seconds_below_two_minutes() {
+        assert_eq!(format_cache_countdown(119), "119s");
+        assert_eq!(format_cache_countdown(5), "5s");
     }
 
     // --- StatusInput deserialization ---

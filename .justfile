@@ -47,11 +47,11 @@ install:
     settings=~/.claude/settings.json
     if [[ -f "$settings" ]]; then
         tmp=$(mktemp)
-        jq '.statusLine = {"type": "command", "command": "~/.claude/cc-statusline-rs"}' "$settings" > "$tmp" \
+        jq '.statusLine = {"type": "command", "command": "~/.claude/cc-statusline-rs", "refreshInterval": 10}' "$settings" > "$tmp" \
             && mv "$tmp" "$settings"
         echo "updated $settings"
     else
-        echo '{"statusLine": {"type": "command", "command": "~/.claude/cc-statusline-rs"}}' > "$settings"
+        echo '{"statusLine": {"type": "command", "command": "~/.claude/cc-statusline-rs", "refreshInterval": 10}}' > "$settings"
         echo "created $settings"
     fi
     echo "installed to ~/.claude/cc-statusline-rs"
