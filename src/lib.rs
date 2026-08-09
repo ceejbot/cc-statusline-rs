@@ -222,14 +222,12 @@ fn render(input: &StatusInput) -> String {
         })
         .unwrap_or_default();
 
+    let now = epoch_now();
+
     let rate_limits_display = input
         .rate_limits
         .as_ref()
         .map(|rl| {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
             let mut parts = Vec::new();
             for (label, win) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
                 if let Some(w) = win {
@@ -258,7 +256,10 @@ fn render(input: &StatusInput) -> String {
         .transcript_path
         .as_deref()
         .and_then(|path| cache_status(path, input.rate_limits.is_some()))
-        .and_then(|(remaining, ttl)| cache_display(remaining, ttl))
+        .and_then(|(remaining, ttl)| {
+            let break_at = format_break_time(now + remaining, &jiff::tz::TimeZone::system());
+            cache_display(remaining, ttl, &break_at)
+        })
         .unwrap_or_default();
 
     let current_dir = match input.workspace.current_dir {
@@ -375,6 +376,13 @@ fn render(input: &StatusInput) -> String {
         ),
         None => format!("{vim_display}{CYAN}{display_dir}{RESET}{components_str}"),
     }
+}
+
+fn epoch_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn pct_color(pct: f64) -> &'static str {
@@ -574,37 +582,39 @@ fn cache_status(transcript_path: &str, has_rate_limits: bool) -> Option<(u64, u6
     Some((ttl.secs().saturating_sub(idle), ttl.secs()))
 }
 
-/// Render the cache-break countdown. Hidden while more than a quarter of the
-/// TTL remains; escalates yellow/orange/red below 25%/10%/5%; a snowflake
-/// `cold` once the cache has expired (the next message pays a cache rewrite).
-fn cache_display(remaining_secs: u64, ttl_secs: u64) -> Option<String> {
-    if ttl_secs == 0 || remaining_secs * 4 >= ttl_secs {
+/// Render the cache-break indicator: the local wall-clock time the prompt
+/// cache will expire. Always visible, because the statusline mostly refreshes
+/// on activity — a countdown that only appears near expiry is never seen.
+/// Color escalates from gray through yellow/orange/red below 25%/10%/5% of
+/// TTL remaining; a snowflake `cold` once the cache has expired (the next
+/// message pays a cache rewrite).
+fn cache_display(remaining_secs: u64, ttl_secs: u64, break_at: &str) -> Option<String> {
+    if ttl_secs == 0 {
         return None;
     }
     if remaining_secs == 0 {
         return Some(format!("{LIGHT_BLUE}\u{f0717} cold{RESET}"));
     }
-    let color = if remaining_secs * 10 >= ttl_secs {
+    let color = if remaining_secs * 4 >= ttl_secs {
+        GRAY
+    } else if remaining_secs * 10 >= ttl_secs {
         YELLOW
     } else if remaining_secs * 20 >= ttl_secs {
         ORANGE
     } else {
         RED
     };
-    Some(format!(
-        "{color}\u{f051b} {}{RESET}",
-        format_cache_countdown(remaining_secs)
-    ))
+    Some(format!("{color}\u{f051b} {break_at}{RESET}"))
 }
 
-/// Countdown text tuned to a 10s statusline refresh: minutes down to two
-/// minutes, whole seconds below that.
-fn format_cache_countdown(secs: u64) -> String {
-    if secs >= 120 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{secs}s")
-    }
+/// Format an epoch timestamp as a compact local wall-clock time, e.g.
+/// `3:42pm`. An unrepresentable timestamp degrades to an empty string.
+fn format_break_time(epoch_secs: u64, tz: &jiff::tz::TimeZone) -> String {
+    let Ok(ts) = jiff::Timestamp::from_second(epoch_secs.min(i64::MAX as u64) as i64) else {
+        return String::new();
+    };
+    let zoned = ts.to_zoned(tz.clone());
+    jiff::fmt::strtime::format("%-I:%M%P", &zoned).unwrap_or_default()
 }
 
 fn fish_shorten_path(path: &str) -> String {
@@ -818,53 +828,62 @@ mod tests {
     // --- cache_display ---
 
     #[test]
-    fn cache_display_hidden_while_warm() {
-        assert!(cache_display(3600, 3600).is_none());
-        assert!(cache_display(900, 3600).is_none()); // exactly 25%
-        assert!(cache_display(75, 300).is_none());
+    fn cache_display_gray_while_warm() {
+        let warm = cache_display(3600, 3600, "3:42pm").expect("shown while warm");
+        assert!(warm.contains(GRAY) && warm.contains("3:42pm"));
+        let boundary = cache_display(900, 3600, "3:42pm").expect("shown at exactly 25%");
+        assert!(boundary.contains(GRAY));
     }
 
     #[test]
     fn cache_display_bands_one_hour() {
-        let yellow = cache_display(899, 3600).expect("shown below 25%");
-        assert!(yellow.contains(YELLOW) && yellow.contains("14m"));
-        let orange = cache_display(300, 3600).expect("shown below 10%");
-        assert!(orange.contains(ORANGE) && orange.contains("5m"));
-        let red = cache_display(100, 3600).expect("shown below 5%");
-        assert!(red.contains(RED) && red.contains("100s"));
+        let yellow = cache_display(899, 3600, "3:42pm").expect("shown below 25%");
+        assert!(yellow.contains(YELLOW) && yellow.contains("3:42pm"));
+        let orange = cache_display(300, 3600, "3:42pm").expect("shown below 10%");
+        assert!(orange.contains(ORANGE));
+        let red = cache_display(100, 3600, "3:42pm").expect("shown below 5%");
+        assert!(red.contains(RED));
     }
 
     #[test]
     fn cache_display_bands_five_min() {
-        let yellow = cache_display(74, 300).expect("shown below 25%");
-        assert!(yellow.contains(YELLOW) && yellow.contains("74s"));
-        let red = cache_display(10, 300).expect("shown below 5%");
-        assert!(red.contains(RED) && red.contains("10s"));
+        let yellow = cache_display(74, 300, "3:42pm").expect("shown below 25%");
+        assert!(yellow.contains(YELLOW));
+        let red = cache_display(10, 300, "3:42pm").expect("shown below 5%");
+        assert!(red.contains(RED));
     }
 
     #[test]
     fn cache_display_cold_after_expiry() {
-        let cold = cache_display(0, 3600).expect("cold state shown");
+        let cold = cache_display(0, 3600, "3:42pm").expect("cold state shown");
         assert!(cold.contains(LIGHT_BLUE) && cold.contains("cold"));
+        // The break time is in the past once cold; it must not be shown.
+        assert!(!cold.contains("3:42pm"));
     }
 
     #[test]
     fn cache_display_zero_ttl_hidden() {
-        assert!(cache_display(0, 0).is_none());
+        assert!(cache_display(0, 0, "3:42pm").is_none());
     }
 
-    // --- format_cache_countdown ---
+    // --- format_break_time ---
 
-    #[test]
-    fn cache_countdown_minutes_above_two_minutes() {
-        assert_eq!(format_cache_countdown(720), "12m");
-        assert_eq!(format_cache_countdown(120), "2m");
+    fn fixed_tz(hours: i8) -> jiff::tz::TimeZone {
+        jiff::tz::TimeZone::fixed(jiff::tz::Offset::constant(hours))
     }
 
     #[test]
-    fn cache_countdown_seconds_below_two_minutes() {
-        assert_eq!(format_cache_countdown(119), "119s");
-        assert_eq!(format_cache_countdown(5), "5s");
+    fn break_time_formats_local_wall_clock() {
+        // 2026-08-08 22:42:00 UTC → 3:42pm at UTC-7.
+        assert_eq!(format_break_time(1_786_228_920, &fixed_tz(-7)), "3:42pm");
+    }
+
+    #[test]
+    fn break_time_morning_and_midnight() {
+        // 2026-08-08 16:05:00 UTC → 9:05am at UTC-7.
+        assert_eq!(format_break_time(1_786_205_100, &fixed_tz(-7)), "9:05am");
+        // 2026-08-08 07:10:00 UTC → 12:10am at UTC-7 (12-hour clock, no 0 o'clock).
+        assert_eq!(format_break_time(1_786_173_000, &fixed_tz(-7)), "12:10am");
     }
 
     // --- StatusInput deserialization ---
@@ -1258,13 +1277,6 @@ mod tests {
         assert!(output.contains("79%"));
         assert!(output.contains("7d"));
         assert!(output.contains("34%"));
-    }
-
-    fn epoch_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
     }
 
     #[test]

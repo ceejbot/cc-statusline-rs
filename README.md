@@ -16,7 +16,7 @@ Idea from [steipete's gist](https://gist.github.com/steipete/8396e512171d31e934f
 - Session cost and duration
 - Agent name, when running as a sub-agent
 - Rate-limit windows (5h and 7d) with reset countdowns, for subscribers
-- A prompt-cache expiry countdown, so you know when your next message reheats a cold cache
+- The local wall-clock time your prompt cache will expire, so you know when your next message reheats a cold cache
 
 Components with no data vanish from the line.
 
@@ -57,7 +57,7 @@ Then add this to `~/.claude/settings.json`:
 }
 ```
 
-The 10-second refresh is what lets the cache-expiry countdown tick while the session is idle.
+The 10-second refresh keeps the cache-expiry color bands and the `cold` flip current while the session is idle.
 
 ## License
 
