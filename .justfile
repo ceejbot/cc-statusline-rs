@@ -29,6 +29,7 @@ version BUMP:
     current=$(tomato get package.version Cargo.toml)
     version=$(semver-bump {{ BUMP }} $current)
     tomato set package.version "$version" Cargo.toml &> /dev/null
+    tomato set version "$version" .formulaic.toml &> /dev/null
     cargo generate-lockfile
     git commit Cargo.toml Cargo.lock -m "v${version}"
     git tag "v${version}"
@@ -44,22 +45,13 @@ install:
     chmod +x ~/.claude/cc-statusline-rs
     xattr -cr ~/.claude/cc-statusline-rs
     codesign -fs - ~/.claude/cc-statusline-rs
-    settings=~/.claude/settings.json
-    if [[ -f "$settings" ]]; then
-        tmp=$(mktemp)
-        jq '.statusLine = {"type": "command", "command": "~/.claude/cc-statusline-rs", "refreshInterval": 10}' "$settings" > "$tmp" \
-            && mv "$tmp" "$settings"
-        echo "updated $settings"
-    else
-        echo '{"statusLine": {"type": "command", "command": "~/.claude/cc-statusline-rs", "refreshInterval": 10}}' > "$settings"
-        echo "created $settings"
-    fi
+    ~/.claude/cc-statusline-rs setup
     echo "installed to ~/.claude/cc-statusline-rs"
 
 # Install tools
 setup:
     brew tap ceejbot/homebrew-tap
-    brew install tomato semver-bump jq
+    brew install tomato semver-bump
 
 RESET := "\\e[0m"
 BOLD_YELLOW := "\\e[1;33m"

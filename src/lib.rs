@@ -142,6 +142,70 @@ pub fn statusline() -> String {
     render(&input)
 }
 
+/// Point the Claude Code `statusLine` setting at this binary: merge the entry
+/// into `~/.claude/settings.json`, creating the file if needed and preserving
+/// everything else in it. Returns the success message to print.
+pub fn setup(command_override: Option<&str>) -> Result<String, String> {
+    let command = match command_override {
+        Some(c) => c.to_string(),
+        // Deliberately not canonicalized: a symlink like
+        // /opt/homebrew/bin/cc-statusline-rs survives upgrades, while the
+        // Cellar path it points at does not.
+        None => std::env::current_exe()
+            .map_err(|e| format!("cannot locate this executable: {e}"))?
+            .to_string_lossy()
+            .into_owned(),
+    };
+
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "neither HOME nor USERPROFILE is set; cannot find ~/.claude".to_string())?;
+    let claude_dir = std::path::Path::new(&home).join(".claude");
+    std::fs::create_dir_all(&claude_dir).map_err(|e| format!("cannot create {}: {e}", claude_dir.display()))?;
+    let settings = claude_dir.join("settings.json");
+
+    let existing = match std::fs::read_to_string(&settings) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", settings.display())),
+    };
+    let verb = if existing.is_some() { "updated" } else { "created" };
+    let merged = merge_statusline(existing.as_deref(), &command).map_err(|e| format!("{}: {e}", settings.display()))?;
+
+    // Write to a sibling temp file and rename so a failure mid-write can
+    // never leave settings.json truncated.
+    let tmp = claude_dir.join("settings.json.tmp");
+    std::fs::write(&tmp, merged).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &settings).map_err(|e| format!("cannot replace {}: {e}", settings.display()))?;
+
+    Ok(format!("{verb} {} — statusLine command: {command}", settings.display()))
+}
+
+/// Pure merge: replace the `statusLine` key in the settings JSON, leaving all
+/// sibling keys untouched. `existing` is the raw file contents, or None when
+/// the file doesn't exist yet. A file that doesn't parse as a JSON object is
+/// an error, never clobbered.
+fn merge_statusline(existing: Option<&str>, command: &str) -> Result<String, String> {
+    let mut root = match existing.map(str::trim).filter(|text| !text.is_empty()) {
+        None => serde_json::Value::Object(serde_json::Map::new()),
+        Some(text) => serde_json::from_str(text).map_err(|e| format!("not valid JSON ({e}); leaving it alone"))?,
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "top level is not a JSON object; leaving it alone".to_string())?;
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": command,
+            "refreshInterval": 10,
+        }),
+    );
+    let mut out = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    out.push('\n');
+    Ok(out)
+}
+
 fn model_display(input: &StatusInput) -> String {
     let Some(ref model) = input.model.display_name else {
         return String::new();
@@ -517,8 +581,13 @@ fn parse_git_status(stdout: &str) -> GitStatus {
     status
 }
 
+/// Display-only home prefix: normalized to forward slashes to match
+/// `fish_shorten_path`'s separator handling. Not for filesystem access.
 fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(|h| h.replace('\\', "/"))
+        .unwrap_or_else(|_| "/".to_string())
 }
 
 fn format_cost(cost: f64) -> String {
@@ -765,6 +834,9 @@ fn format_break_time(epoch_secs: u64, tz: &jiff::tz::TimeZone) -> String {
 
 fn fish_shorten_path(path: &str) -> String {
     let home = home_dir();
+    // Windows paths arrive with backslashes; display everything with forward
+    // slashes so one shortening pass serves both. Identity on unix paths.
+    let path = path.replace('\\', "/");
     let path = path
         .strip_prefix(&home)
         .filter(|_| !home.is_empty() && home != "/")
@@ -772,7 +844,7 @@ fn fish_shorten_path(path: &str) -> String {
         // ~backup just because it shares a string prefix with /Users/ceej.
         .filter(|rest| rest.is_empty() || rest.starts_with('/'))
         .map(|rest| format!("~{rest}"))
-        .unwrap_or_else(|| path.to_string());
+        .unwrap_or(path);
 
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() <= 1 {
@@ -783,7 +855,8 @@ fn fish_shorten_path(path: &str) -> String {
         .iter()
         .enumerate()
         .map(|(i, part)| {
-            if i == parts.len() - 1 || part.is_empty() || *part == "~" {
+            // Drive letters stay whole: C:/tools/thing → C:/t/thing.
+            if i == parts.len() - 1 || part.is_empty() || *part == "~" || part.ends_with(':') {
                 part.to_string()
             } else if part.starts_with('.') && part.len() > 1 {
                 format!(".{}", part.chars().nth(1).unwrap_or_default())
@@ -923,6 +996,26 @@ mod tests {
         let shortened = fish_shorten_path(&path);
         assert!(!shortened.starts_with('~'));
         assert!(shortened.ends_with("project"));
+    }
+
+    #[test]
+    fn fish_shorten_windows_drive_letter() {
+        // Drive letter stays whole; separators normalize for display.
+        assert_eq!(fish_shorten_path(r"C:\tools\thing"), "C:/t/thing");
+    }
+
+    #[test]
+    fn fish_shorten_backslash_home() {
+        // A backslash rendering of $HOME still collapses to a tilde.
+        let home = home_dir();
+        let path = format!("{home}/projects/myrepo").replace('/', "\\");
+        assert_eq!(fish_shorten_path(&path), "~/p/myrepo");
+    }
+
+    #[test]
+    fn fish_shorten_unc_path() {
+        // Leading empty components survive, so UNC roots keep their slashes.
+        assert_eq!(fish_shorten_path(r"\\server\share\docs\file"), "//s/s/d/file");
     }
 
     // --- detect_ttl ---
@@ -1715,5 +1808,68 @@ mod tests {
         let input: StatusInput = serde_json::from_str(json).expect("effort JSON deserializes");
         let output = render(&input);
         assert!(output.contains("Opus·ultra"));
+    }
+
+    // --- merge_statusline ---
+
+    fn statusline_value(merged: &str) -> serde_json::Value {
+        let root: serde_json::Value = serde_json::from_str(merged).expect("merge output is JSON");
+        root["statusLine"].clone()
+    }
+
+    #[test]
+    fn merge_creates_from_nothing() {
+        let merged = merge_statusline(None, "/opt/bin/cc").expect("merge from None");
+        let entry = statusline_value(&merged);
+        assert_eq!(entry["type"], "command");
+        assert_eq!(entry["command"], "/opt/bin/cc");
+        assert_eq!(entry["refreshInterval"], 10);
+        assert!(merged.ends_with('\n'));
+    }
+
+    #[test]
+    fn merge_treats_empty_file_as_new() {
+        let merged = merge_statusline(Some("  \n"), "/opt/bin/cc").expect("merge from blank");
+        assert_eq!(statusline_value(&merged)["command"], "/opt/bin/cc");
+    }
+
+    #[test]
+    fn merge_preserves_sibling_keys() {
+        let existing = r#"{"model": "opus", "env": {"FOO": "1"}}"#;
+        let merged = merge_statusline(Some(existing), "/opt/bin/cc").expect("merge");
+        let root: serde_json::Value = serde_json::from_str(&merged).expect("output is JSON");
+        assert_eq!(root["model"], "opus");
+        assert_eq!(root["env"]["FOO"], "1");
+        assert_eq!(root["statusLine"]["command"], "/opt/bin/cc");
+    }
+
+    #[test]
+    fn merge_replaces_statusline_wholesale() {
+        // Stale sub-keys must not survive the merge (jq assignment semantics).
+        let existing = r#"{"statusLine": {"type": "command", "command": "/old", "padding": 2}}"#;
+        let merged = merge_statusline(Some(existing), "/new").expect("merge");
+        let entry = statusline_value(&merged);
+        assert_eq!(entry["command"], "/new");
+        assert!(entry.get("padding").is_none());
+    }
+
+    #[test]
+    fn merge_rejects_invalid_json() {
+        assert!(merge_statusline(Some("{not json"), "/bin/cc").is_err());
+    }
+
+    #[test]
+    fn merge_rejects_non_object_top_level() {
+        assert!(merge_statusline(Some("[1, 2, 3]"), "/bin/cc").is_err());
+    }
+
+    #[test]
+    fn merge_escapes_windows_paths() {
+        let merged =
+            merge_statusline(None, r"C:\Users\ceej\.claude\cc-statusline-rs.exe").expect("merge with backslash path");
+        assert_eq!(
+            statusline_value(&merged)["command"],
+            r"C:\Users\ceej\.claude\cc-statusline-rs.exe"
+        );
     }
 }

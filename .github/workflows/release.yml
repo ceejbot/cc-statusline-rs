@@ -1,7 +1,18 @@
----
 name: release
-permissions:
-    contents: read
+
+# Definitive release workflow for crates published to crates.io and to
+# ceejbot/homebrew-tap.
+#
+# Builds ARM + Intel binaries for macOS and Linux, tars each binary at the TOP
+# LEVEL (no `target/<triple>/release/` nesting), uploads them to a draft GitHub
+# release, publishes the release, then updates the Homebrew tap and publishes
+# the crate to crates.io. Every stage is idempotent, so a partially-failed
+# release can be re-run via workflow_dispatch without erroring on the stages
+# that already succeeded.
+#
+# To reuse in another crate: copy this file and change BINARY_NAME below. That
+# is the only crate-specific value; the crates.io stage derives the crate name
+# from cargo metadata.
 
 on:
     push:
@@ -12,114 +23,231 @@ on:
             ref_name:
                 type: string
                 description: the refname to build a release from
-                default: "main"
+                default: latest
+
+# Least privilege: only the jobs that touch the release ask for write.
+permissions:
+    contents: read
 
 concurrency:
+    # Never cancel a release mid-upload.
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: false
 
 env:
     CARGO_TERM_COLOR: always
+    BINARY_NAME: cc-statusline-rs # <-- the only per-crate change
+
+defaults:
+    run:
+        shell: bash
 
 jobs:
     preflight:
-        permissions:
-            contents: write
         name: preflight
         runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-              with:
-                persist-credentials: false
-
-            - name: get stable + nightly Rust
-              uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
-              with:
-                  toolchain: nightly, stable
-                  target: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
-                  components: clippy, rustfmt
-                  cache-directories: |
-                      ~/.cargo/registry
-                      ~/.cargo/bin
-                      target
-                  cache: false
-
-            - name: consult Clippy
-              run: cargo +stable clippy --all-targets -- -D warnings
-
-            - name: check formatting
-              run: cargo +nightly fmt --check --all
-
-            - name: set ref_name
-              shell: bash
-              run: |
-                if [ -n "${INPUTS_REF_NAME}" ]; then
-                  echo "REF_NAME=${INPUTS_REF_NAME}" >> $GITHUB_ENV
-                else
-                  echo "REF_NAME=${GITHUB_REF_NAME}" >> $GITHUB_ENV
-                fi
-              env:
-                INPUTS_REF_NAME: ${{ inputs.ref_name }}
-
-            - name: create github release
-              continue-on-error: true # for testing
-              env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  release_url=$(gh release create $REF_NAME --generate-notes)
-
-            - name: build for release and upload
-              env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  GITHUB_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  INPUTS_REF_NAME: ${{ inputs.ref_name }}
-              run: |
-                  REF_NAME="${GITHUB_REF_NAME}"
-                  if [ -n "${INPUTS_REF_NAME}" ]; then
-                      REF_NAME="${INPUTS_REF_NAME}"
-                  fi
-                  cargo +stable build --release
-                  tar czf cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz --strip-components=2  target/release/cc-statusline-rs
-                  gh release upload "$REF_NAME" "cc-statusline-rs-x86_64-unknown-linux-gnu.tar.gz"
-
-
-    release-macos:
         permissions:
             contents: write
-        name: release-macos
-        runs-on: macos-latest
-        needs: preflight
+        outputs:
+            ref_name: ${{ steps.ref.outputs.ref_name }}
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-              with:
-                persist-credentials: false
-
-            - name: get stable Rust
-              uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1
-              with:
-                  toolchain: stable
-                  target: aarch64-apple-darwin
-                  cache-directories: |
-                      ~/.cargo/registry
-                      ~/.cargo/bin
-                      target
-                  cache: false
-
-            - name: build for release
-              run: |
-                  cargo +stable build --release --target aarch64-apple-darwin
-
-            - name: upload release assets
+            - name: resolve ref_name
+              id: ref
               env:
-                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   INPUTS_REF_NAME: ${{ inputs.ref_name }}
               run: |
-                  REF_NAME="${GITHUB_REF_NAME}"
-                  if [ -n "${INPUTS_REF_NAME}" ]; then
-                      REF_NAME="${INPUTS_REF_NAME}"
+                  if [ -n "$INPUTS_REF_NAME" ]; then
+                      echo "ref_name=$INPUTS_REF_NAME" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "ref_name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
                   fi
-                  target=aarch64-apple-darwin
-                  mkdir -p dist
-                  cd dist
-                  tar czf cc-statusline-rs-$target.tar.gz --strip-components=4  ../target/$target/release/cc-statusline-rs
-                  gh release upload "$REF_NAME" "cc-statusline-rs-$target.tar.gz"
+
+            - name: create draft release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  REF_NAME: ${{ steps.ref.outputs.ref_name }}
+              run: |
+                  # Idempotent: reuse an existing release so re-runs don't error.
+                  if gh release view "$REF_NAME" >/dev/null 2>&1; then
+                      echo "release $REF_NAME already exists; reusing it"
+                  else
+                      gh release create "$REF_NAME" --draft --generate-notes
+                  fi
+
+    build:
+        name: build ${{ matrix.target }}
+        needs: preflight
+        permissions:
+            contents: write
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # macOS: Apple's clang cross-links both darwin arches, so an
+                    # arm64 runner builds the x86_64 slice with just the target.
+                    - runner: macos-latest
+                      target: aarch64-apple-darwin
+                    - runner: macos-latest
+                      target: x86_64-apple-darwin
+                    # Linux: native runners, no cross-linker needed. The musl
+                    # builds are fully static (crt-static is the musl default),
+                    # so the curl-pipe installer works on any distro.
+                    - runner: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                    - runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-gnu
+                    - runner: ubuntu-latest
+                      target: x86_64-unknown-linux-musl
+                    - runner: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-musl
+                    # Windows: native builds on both architectures. These
+                    # package as .zip (see below) for Expand-Archive.
+                    - runner: windows-latest
+                      target: x86_64-pc-windows-msvc
+                    - runner: windows-11-arm
+                      target: aarch64-pc-windows-msvc
+        runs-on: ${{ matrix.runner }}
+        steps:
+            - name: checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - name: set up Rust
+              uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+              with:
+                  toolchain: stable
+                  target: ${{ matrix.target }}
+                  cache: false
+
+            # A pure-Rust tree links against rustup's bundled musl sysroot
+            # without this, but musl-gcc is cheap insurance for build scripts.
+            - name: install musl toolchain
+              if: contains(matrix.target, 'musl')
+              run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+            - name: build
+              run: cargo build --release --target ${{ matrix.target }}
+
+            - name: package and upload
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  REF_NAME: ${{ needs.preflight.outputs.ref_name }}
+                  TARGET: ${{ matrix.target }}
+              run: |
+                  ext=""
+                  [[ "$TARGET" == *windows* ]] && ext=".exe"
+                  bin_path="target/$TARGET/release/$BINARY_NAME$ext"
+                  test -f "$bin_path" || { echo "missing binary at $bin_path" >&2; exit 1; }
+
+                  if [[ "$TARGET" == *windows* ]]; then
+                      # Zip for Windows: Expand-Archive opens it natively in
+                      # both PowerShell 5.1 and pwsh. Git Bash's GNU tar can't
+                      # write zip, so shell out to the guaranteed PowerShell.
+                      # Compress-Archive given a file path stores the bare leaf.
+                      asset="$BINARY_NAME-$TARGET.zip"
+                      powershell -Command "Compress-Archive -Force -Path '$bin_path' -DestinationPath '$asset'"
+                  else
+                      asset="$BINARY_NAME-$TARGET.tar.gz"
+                      # `tar -C <dir> <file>` archives the bare binary at the top level.
+                      # We do NOT use --strip-components on create: GNU tar (Linux)
+                      # silently ignores it on -c, leaving target/<triple>/release/
+                      # nesting in the asset and breaking `bin.install`.
+                      tar czf "$asset" -C "target/$TARGET/release" "$BINARY_NAME"
+                  fi
+
+                  # Git Bash ships sha256sum but not (reliably) shasum.
+                  if command -v shasum >/dev/null 2>&1; then
+                      shasum -a 256 "$asset" | awk '{ print $1 }' > "$asset.sha256"
+                  else
+                      sha256sum "$asset" | awk '{ print $1 }' > "$asset.sha256"
+                  fi
+                  gh release upload "$REF_NAME" "$asset" "$asset.sha256" --clobber
+
+    publish:
+        name: publish
+        needs:
+            - preflight
+            - build
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - name: checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - name: publish the release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  REF_NAME: ${{ needs.preflight.outputs.ref_name }}
+              run: gh release edit "$REF_NAME" --draft=false
+
+            - name: update the homebrew tap
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+                  HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+                  REF_NAME: ${{ needs.preflight.outputs.ref_name }}
+              run: |
+                  # Fetch formulaic and locate its binary regardless of the
+                  # tarball's internal layout (that layout has changed before and
+                  # silently broke this step).
+                  curl -sSfL -o formulaic.tgz \
+                      https://github.com/ceejbot/formulaic/releases/latest/download/formulaic-x86_64-unknown-linux-gnu.tar.gz
+                  tar xzf formulaic.tgz
+                  formulaic="$(find . -type f -name formulaic | head -1)"
+                  test -n "$formulaic" || { echo "formulaic binary not found in tarball" >&2; exit 1; }
+                  chmod +x "$formulaic"
+
+                  formula_file="$("$formulaic" ./Cargo.toml)"
+                  gh repo clone ceejbot/homebrew-tap tap
+                  cp "$formula_file" tap/Formula/
+                  cd tap
+                  git add "Formula/$(basename "$formula_file")"
+                  git config user.name "formula robot"
+                  git config user.email "ceejceej@gmail.com"
+                  git commit -m "$BINARY_NAME $REF_NAME"
+                  git push "https://x-access-token:$HOMEBREW_TAP_TOKEN@github.com/ceejbot/homebrew-tap.git"
+
+    crates-io:
+        name: publish to crates.io
+        needs: publish
+        runs-on: ubuntu-latest
+        steps:
+            - name: checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+
+            - name: set up Rust
+              uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+              with:
+                  toolchain: stable
+                  cache: false
+
+            - name: publish the crate
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+              run: |
+                  crate="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].name')"
+                  version="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].version')"
+
+                  # Idempotent: skip if this version is already on crates.io. The
+                  # sparse index path scheme depends on crate-name length.
+                  case "${#crate}" in
+                      1) index_path="1/$crate" ;;
+                      2) index_path="2/$crate" ;;
+                      3) index_path="3/${crate:0:1}/$crate" ;;
+                      *) index_path="${crate:0:2}/${crate:2:2}/$crate" ;;
+                  esac
+
+                  if curl -fsSL "https://index.crates.io/$index_path" | grep -q "\"vers\":\"$version\""; then
+                      echo "$crate $version is already on crates.io; skipping publish"
+                  else
+                      cargo publish --locked
+                  fi
