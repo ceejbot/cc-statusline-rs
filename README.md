@@ -1,8 +1,10 @@
 # cc-statusline-rs
 
-Ceej's informative ANSI statusline for Claude Code, in Rust. It reads the status-hook JSON on stdin and prints where you are, what the model is doing, and what it's costing you. It fits everything into one line and splits into two when it can't. It requires that you use a [Nerd Font](https://www.nerdfonts.com/) in your terminal but otherwise needs nothing.
+Ceej's informative ANSI statusline for Claude Code, in Rust. It reads the status-hook JSON on stdin and prints where you are, what the model is doing, and what it's costing you. It fits everything into one line and splits into two when it can't. It asks for a [Nerd Font](https://www.nerdfonts.com/) in your terminal and nothing else.
 
-This is a fork of [khoi/cc-statusline-rs](https://github.com/khoi/cc-statusline-rs), which in turn grew from [steipete's gist](https://gist.github.com/steipete/8396e512171d31e934f0013e5651691e). The idea came from upstream; the code here has been rewritten from the ground up and has diverged considerably. Thanks to both for the starting point.
+For me this is two tools in one: an agent command-line prompt, and a running meter on what the session is costing my employer. The meter is the harder half; see the cache section below.
+
+This is a fork of [khoi/cc-statusline-rs](https://github.com/khoi/cc-statusline-rs), which in turn grew from [steipete's gist](https://gist.github.com/steipete/8396e512171d31e934f0013e5651691e). The idea came from upstream; the code here has been rewritten from the ground up. Thanks to both for the starting point.
 
 ## Installing
 
@@ -30,7 +32,7 @@ Anywhere with a Rust toolchain:
 cargo install cc-statusline-rs && cc-statusline-rs setup
 ```
 
-`cc-statusline-rs setup` rewrites the `statusLine` entry in `~/.claude/settings.json` to point to this binary and set `refreshInterval: 10`. The Linux and Windows scripts download the latest release for your architecture to `~/.claude/`, verify its checksum, and run setup for you; `scripts/install-macos.sh` exists if you'd rather one command than two. Releases ship for ARM and Intel on all three OSes.
+Prefer not to pipe curl into bash? Download the latest release from GitHub, put the binary wherever you like, and run `cc-statusline-rs setup` yourself. Setup rewrites the `statusLine` entry in `~/.claude/settings.json` to point at the binary, with `refreshInterval: 10`. Releases ship for ARM and Intel on all three OSes. Linux builds statically link musl, alas.
 
 From a clone, `just install` builds from source, copies the binary to `~/.claude/`, ad-hoc codesigns it (macOS), and runs the same setup.
 
@@ -58,17 +60,36 @@ The second group is accounting:
 - **Cache expiry**: the local wall-clock time your prompt cache goes cold (`󰔛 3:42pm`), so you know whether your next message reheats a warm cache or pays to rebuild it. Shifts gray → yellow → orange → red as expiry approaches, then flips to `󰜗 cold`.
 - **Next-message cost**, glued to the cache clock: `·20¢→$4.00` is what re-sending your context costs against a warm cache versus what it will cost after expiry. Once cold, only the rebuild figure remains.
 
-Components with no data vanish from the line, and an empty second line vanishes entirely. In a fresh session outside a git repo, you get one short line; deep in a long session in a narrow terminal, you get the full two-row instrument panel. The width check reads the `COLUMNS` environment variable, which Claude Code sets for statusline processes (v2.1.153+); when it's absent, the split layout is assumed.
+Components with no data vanish from the line, and an empty second line vanishes entirely. In a fresh session outside a git repo, you get one short line; deep in a long session in a narrow terminal, you get the full two-row instrument panel. The width check reads the `COLUMNS` environment variable, which Claude Code sets for statusline processes (v2.1.153+); absent that, you get the split layout.
 
 ### Cache rules what?
 
+This tool exists to show me _context size_ and _the projected cost of my next message_. Cache breaks dominate session cost, and knowing when your cache is about to go cold is hard — harder still on a pay-as-you-go API account, where the cache times out after 5 minutes by default.
+
+When does your cache expire?
+
 The cache indicator works out the TTL by reading the tail of your session transcript: it finds the most recent cache-creation usage record and infers the tier (1-hour or 5-minute) from which bucket the tokens landed in. Failing that, it falls back to the [`FORCE_PROMPT_CACHING_5M`](https://code.claude.com/docs/en/prompt-caching#override-the-ttl) and [`ENABLE_PROMPT_CACHING_1H`](https://code.claude.com/docs/en/prompt-caching#cache-lifetime) environment variables, then to a heuristic (rate limits present means a subscriber plan, which means 1h). Setting [`DISABLE_PROMPT_CACHING=1`](https://code.claude.com/docs/en/prompt-caching#disable-prompt-caching) suppresses the indicator entirely.
 
-An absolute time stays true even when the line isn't redrawing, but the color bands and the `cold` flip only stay current if the statusline refreshes while you're idle. Set `refreshInterval` in your settings (the install recipe uses 10 seconds).
+An absolute time stays true even when the line isn't redrawing, but the color bands and the `cold` flip only stay current if the statusline refreshes while you're idle. `refreshInterval` in your settings keeps the line updating when you're not doing anything; the number is _seconds_.
 
-The cost projection rides on the same machinery. Warm cost is your context re-read at the cache-read rate (0.1× the base input price); cold cost is the full rewrite at the cache-write rate for the detected TTL tier (1.25× for 5-minute, 2× for 1-hour — the same tier detection that sets the clock). Base prices are matched by model family (Fable and Mythos $10/MTok, Opus $5, Sonnet $3, Haiku $1), so treat the figures as good estimates, not invoices. Output tokens aren't included — nobody knows how much the model is going to say next, least of all the model. An unrecognized model family drops the projection and keeps the clock.
+The cost projection uses your TTL tier, your model family, and the size of the context that gets re-read. It leaves out output tokens: nobody knows what the model says next, least of all the model. The projection is _only_ the cache re-warm cost.
 
-One footnote for the static Linux builds: they read `/usr/share/zoneinfo` for the cache clock's local time, so in a container without `tzdata` the expiry time shows in UTC. Everything else is unaffected.
+At the time of writing, here's how to guess the cost of your next message: divide your context size by 1,000,000 to get MTok, multiply by your model's base price per MTok, then apply the warmth multiplier:
+
+- warm: `0.1` × base
+- cold, 5-minute TTL tier: `1.25` × base
+- cold, 1-hour TTL tier: `2.0` × base
+
+Worked out as effective $ per MTok of context:
+
+| Model        | Base $/MTok |  Warm | Cold 5min | Cold 1 hour |
+|--------------|-------------|-------|-----------|-------------|
+| Fable/Mythos |         $10 | $1.00 |    $12.50 |      $20.00 |
+| Opus         |          $5 | $0.50 |     $6.25 |      $10.00 |
+| Sonnet       |          $3 | $0.30 |     $3.75 |       $6.00 |
+| Haiku        |          $1 | $0.10 |     $1.25 |       $2.00 |
+
+These are _estimates_, not your bill. The cost data Anthropic sends in the statusline JSON is plain wrong anyway, so read every dollar figure here as directional, not a prediction of what you'll pay.
 
 ## Development
 

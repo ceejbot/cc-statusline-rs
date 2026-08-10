@@ -156,6 +156,11 @@ pub fn setup(command_override: Option<&str>) -> Result<String, String> {
             .to_string_lossy()
             .into_owned(),
     };
+    // The docs don't pin down which shell runs statusLine commands on
+    // Windows, and Git Bash eats backslashes; forward slashes are accepted
+    // by every candidate (bash, PowerShell, CreateProcess).
+    #[cfg(windows)]
+    let command = command.replace('\\', "/");
 
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
