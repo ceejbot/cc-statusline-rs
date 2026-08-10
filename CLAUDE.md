@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project Overview
 
-A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline showing: working directory (fish-style shortened), git branch, worktree indicator, model name, context window usage (progress bar + percentage), session cost, lines changed, agent name, and session duration.
+A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline in one or two lines depending on terminal width. Line 1 (identity): working directory (fish-style shortened), git branch, worktree indicator, lines changed, model name, context window usage (progress bar + percentage). Line 2 (accounting): session cost, agent name, session duration, rate limits, and the cache clock with a projected next-message cost (warm vs cold). When everything fits the terminal comfortably on one line, both groups render as a single line.
 
 ## Key Commands
 
@@ -53,7 +53,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 ### Statusline Assembly
 
-`render()` builds these display components, then joins non-empty ones with `•` separators. The vim badge is prepended outside the bullet-joined sequence:
+`render()` builds these display components, joining non-empty ones with `•` separators. Layout is dynamic: if the fully assembled single line fits the terminal width (`COLUMNS` env var, set by Claude Code since v2.1.153) with `COMFORT_MARGIN` (4 columns) of slack, everything stays on one line. Otherwise — or when `COLUMNS` is absent/unparseable — the components split: line 1 carries components 1–6 (identity: location, model, context), line 2 carries components 7–11 (accounting: money, time, limits, cache). Width is measured with `visible_width()`, which counts ANSI escapes as zero cells. The second line is emitted only when it has content. Claude Code renders each stdout line as its own statusline row. The vim badge is prepended outside the bullet-joined sequence:
 
 1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
 2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
@@ -65,7 +65,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 8. **Agent**: Agent name in gray with icon
 9. **Duration**: Formatted as `Nh Mm` or `<1m`, from `total_duration_ms`
 10. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`. Each window appends a gray reset countdown (e.g. `·2h 12m`, day-aware as `·5d 2h`) glued to its percentage, shown only when that window is ≥50% used and `resets_at` is in the future (a stale/elapsed timestamp degrades to no countdown)
-11. **Cache break**: the local wall-clock time the prompt cache will expire (e.g. `󰔛 3:42pm`), from `transcript_path`. Last activity = transcript mtime; TTL tier detected from the last nonzero `"cache_creation"` bucket in the transcript tail (`ephemeral_1h_input_tokens` → 1h, `ephemeral_5m_input_tokens` → 5m), falling back to env overrides (`FORCE_PROMPT_CACHING_5M`, `ENABLE_PROMPT_CACHING_1H`) then a plan heuristic (rate limits present → 1h, else 5m). Always visible (an absolute time stays true even when the statusline isn't refreshing): gray while >25% of TTL remains, yellow <25%, orange <10%, red <5%; `󰜗 cold` in light blue after expiry. `DISABLE_PROMPT_CACHING=1` or an unreadable transcript suppresses it entirely. Pairs with `statusLine.refreshInterval` (e.g. 10s) in settings so the color bands and `cold` flip stay current while the session is idle
+11. **Cache break**: the local wall-clock time the prompt cache will expire (e.g. `󰔛 3:42pm`), from `transcript_path`. Last activity = transcript mtime; TTL tier detected from the last nonzero `"cache_creation"` bucket in the transcript tail (`ephemeral_1h_input_tokens` → 1h, `ephemeral_5m_input_tokens` → 5m), falling back to env overrides (`FORCE_PROMPT_CACHING_5M`, `ENABLE_PROMPT_CACHING_1H`) then a plan heuristic (rate limits present → 1h, else 5m). Always visible (an absolute time stays true even when the statusline isn't refreshing): gray while >25% of TTL remains, yellow <25%, orange <10%, red <5%; `󰜗 cold` in light blue after expiry. `DISABLE_PROMPT_CACHING=1` or an unreadable transcript suppresses it entirely. Pairs with `statusLine.refreshInterval` (e.g. 10s) in settings so the color bands and `cold` flip stay current while the session is idle. **Next-message cost projection** glued on in gray: while warm `·20¢→$4.00` (context re-read at the warm cache-read rate → rebuild at the cold cache-write rate), after expiry just `·$4.00`. Input-side only (output tokens are unknowable); context tokens from `current_usage` (fallback: `used_percentage` × window); rate = family base input price (Fable/Mythos $10, Opus $5, Sonnet $3, Haiku $1 per MTok, matched on `display_name`) × 0.1 warm, × 1.25 (5m tier) or 2.0 (1h tier) cold. Unknown model family suppresses the projection, not the clock
 
 ### ANSI Colors
 
@@ -76,7 +76,10 @@ Constants defined at the top of `lib.rs`: `RESET`, `RED`, `GREEN`, `YELLOW`, `CY
 All internal; only `statusline()` is `pub`.
 
 - `statusline()` — Main orchestrator, returns the assembled String
-- `render(&StatusInput)` — Builds the display string from a parsed input
+- `render(&StatusInput)` — Thin wrapper: reads `COLUMNS` via `terminal_cols()` and delegates
+- `render_with_width(&StatusInput, Option<usize>)` — Builds the display string from a parsed input; the width parameter decides single-line vs split layout (None → split), kept explicit for tests
+- `visible_width(&str)` — On-screen column count: ANSI CSI escapes are zero width, all other chars one cell
+- `terminal_cols()` — Parses the `COLUMNS` env var
 - `read_input()` — Reads stdin, deserializes to `StatusInput`
 - `git_status(dir)` — Single `git status --porcelain=v2 --branch` call; returns `Option<GitStatus>` (None when not a repo)
 - `parse_git_status(stdout)` — Pure parser for porcelain v2 output, isolated for testing
@@ -87,16 +90,21 @@ All internal; only `statusline()` is `pub`.
 - `format_reset(secs)` — Day-aware rate-limit reset countdown: `Nd Nh`, `Nh Mm`, `Nm`, or `<1m` (rolls into days, unlike `format_duration`)
 - `detect_ttl(tail)` — Pure parser: finds the most recent nonzero `"cache_creation"` usage object in a transcript tail and returns the `Ttl` tier (escaped in-text mentions don't match)
 - `cache_status(path, has_rate_limits)` — IO shell: transcript mtime + TTL detection → `(remaining_secs, ttl_secs)`; `None` when caching is disabled or transcript unreadable
-- `cache_display(remaining, ttl, break_at)` — Pure band logic for the cache-break component (gray / yellow / orange / red / cold), wrapping the preformatted break time
+- `cache_display(remaining, ttl, break_at, projection)` — Pure band logic for the cache-break component (gray / yellow / orange / red / cold), wrapping the preformatted break time; appends the `(warm, cold)` projection as `·warm→cold` while warm, `·cold` once expired
 - `format_break_time(epoch_secs, tz)` — Epoch → compact local wall-clock time (`3:42pm`) via jiff; takes the timezone as a parameter so tests can pin a fixed offset
+- `base_input_price(display_name)` — Family-matched base input $/MTok (fable/mythos 10, opus 5, sonnet 3, haiku 1); `None` for unknown families
+- `context_tokens(ctx)` — Tokens in the context window from `current_usage`, falling back to `used_percentage` × window size
+- `project_next_cost(tokens, base, ttl_secs)` — Pure math: `(warm, cold)` input-side next-message cost; warm = 0.1×, cold = 1.25× (5m) or 2× (1h)
+- `format_money(usd)` — `<1¢` / `20¢` / `$4.00`; rounds to integer cents first so branch and display agree at the dollar boundary
 
 ### Display Format
 
 ```
-[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22% • 󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78%·2h 12m · 7d 34% • 󰔛 3:42pm
+[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22%
+󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78%·2h 12m · 7d 34% • 󰔛 3:42pm ·20¢→$4.00
 ```
 
-Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, rate limits, and the cache-break time all degrade to nothing when their fields aren't present in the JSON.
+Claude Code renders each stdout line as a separate statusline row. The split happens only when the single line wouldn't fit `COLUMNS` minus the comfort margin; in a wide terminal the same components render as one bullet-joined line. Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, rate limits, cache-break time, and the cost projection all degrade to nothing when their fields aren't present in the JSON; the entire second line disappears when it has no components.
 
 ## Dependencies
 

@@ -204,7 +204,45 @@ fn context_display(ctx: &ContextWindow) -> String {
     )
 }
 
+/// Slack required beyond the line's visible width before we trust a single
+/// line to fit: a line that just barely fits reads as cramped, and terminal
+/// wrap at the exact edge looks worse than the deliberate break.
+const COMFORT_MARGIN: usize = 4;
+
+/// Columns the string occupies on screen: ANSI escape sequences are zero
+/// width, every other char is one cell. The glyphs used here (Nerd Font
+/// icons, box-drawing, arrows) all render single-cell.
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // CSI sequence: ESC [ params, terminated by a byte in @..~
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/// Terminal width as Claude Code reports it (the COLUMNS env var, set for
+/// statusline processes since v2.1.153).
+fn terminal_cols() -> Option<usize> {
+    std::env::var("COLUMNS").ok()?.parse().ok()
+}
+
 fn render(input: &StatusInput) -> String {
+    render_with_width(input, terminal_cols())
+}
+
+fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
     let vim_display = input
         .vim
         .as_ref()
@@ -258,7 +296,17 @@ fn render(input: &StatusInput) -> String {
         .and_then(|path| cache_status(path, input.rate_limits.is_some()))
         .and_then(|(remaining, ttl)| {
             let break_at = format_break_time(now + remaining, &jiff::tz::TimeZone::system());
-            cache_display(remaining, ttl, &break_at)
+            let projection = input
+                .model
+                .display_name
+                .as_deref()
+                .and_then(base_input_price)
+                .and_then(|base| {
+                    let tokens = input.context_window.as_ref().and_then(context_tokens)?;
+                    let (warm, cold) = project_next_cost(tokens, base, ttl);
+                    Some((format_money(warm), format_money(cold)))
+                });
+            cache_display(remaining, ttl, &break_at, projection)
         })
         .unwrap_or_default();
 
@@ -351,31 +399,56 @@ fn render(input: &StatusInput) -> String {
         })
         .unwrap_or_default();
 
-    let components: Vec<String> = [
+    let sep = format!(" {GRAY}• {RESET}");
+
+    // Line 1 is identity: where you are and what the model is doing.
+    let line1: Vec<String> = [
         model_display(input),
         input.context_window.as_ref().map(context_display).unwrap_or_default(),
-        cost_display,
-        agent_display,
-        duration_display,
-        rate_limits_display,
-        cache_break_display,
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
     .collect();
 
-    let components_str = if components.is_empty() {
-        String::new()
-    } else {
-        format!(" {GRAY}• {RESET}{}", components.join(&format!(" {GRAY}• {RESET}")))
+    // Line 2 is accounting: money, time, limits, and the cache clock. Long
+    // branch names crowd line 1, so the whole block lives below it.
+    let line2: Vec<String> = [
+        cost_display, agent_display, duration_display, rate_limits_display, cache_break_display,
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect();
+
+    let head = match branch_display {
+        Some(branch) => {
+            format!("{vim_display}{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2}{RESET} {branch}{lines_changed}")
+        }
+        None => format!("{vim_display}{CYAN}{display_dir}{RESET}"),
     };
 
-    match branch_display {
-        Some(branch) => format!(
-            "{vim_display}{CYAN}{display_dir}{RESET} {LIGHT_BLUE}\u{f02a2}{RESET} {branch}{lines_changed}{components_str}"
-        ),
-        None => format!("{vim_display}{CYAN}{display_dir}{RESET}{components_str}"),
+    let join = |parts: &[String]| {
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" {GRAY}• {RESET}{}", parts.join(&sep))
+        }
+    };
+
+    // Prefer a single line when the terminal comfortably fits everything;
+    // fall back to the two-line split otherwise, or when the width is
+    // unknown (the deliberate break degrades better than an edge-wrapped
+    // line).
+    let combined: Vec<String> = line1.iter().chain(line2.iter()).cloned().collect();
+    let single = format!("{head}{}", join(&combined));
+    if line2.is_empty() {
+        return single;
     }
+    if let Some(cols) = cols {
+        if visible_width(&single) + COMFORT_MARGIN <= cols {
+            return single;
+        }
+    }
+    format!("{head}{}\n{}", join(&line1), line2.join(&sep))
 }
 
 fn epoch_now() -> u64 {
@@ -453,6 +526,64 @@ fn format_cost(cost: f64) -> String {
         format!("{:.3}", cost)
     } else {
         format!("{:.2}", cost)
+    }
+}
+
+/// Base input price in dollars per million tokens, matched by model family
+/// name. An estimate: pricing is per-model, but families share a rate and the
+/// statusline only receives a display name. Unknown families get no
+/// projection rather than a wrong one.
+fn base_input_price(display_name: &str) -> Option<f64> {
+    let name = display_name.to_lowercase();
+    if name.contains("fable") || name.contains("mythos") {
+        Some(10.0)
+    } else if name.contains("opus") {
+        Some(5.0)
+    } else if name.contains("sonnet") {
+        Some(3.0)
+    } else if name.contains("haiku") {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
+/// Tokens currently in the context window, from the last API response's usage
+/// breakdown, falling back to the API-reported percentage of the window.
+fn context_tokens(ctx: &ContextWindow) -> Option<u64> {
+    ctx.current_usage
+        .as_ref()
+        .map(|u| u.input_tokens + u.cache_creation_input_tokens + u.cache_read_input_tokens)
+        .filter(|&t| t > 0)
+        .or_else(|| {
+            ctx.used_percentage
+                .filter(|_| ctx.context_window_size > 0)
+                .map(|pct| (pct / 100.0 * ctx.context_window_size as f64) as u64)
+        })
+        .filter(|&t| t > 0)
+}
+
+/// Input-side cost of the next message as `(warm, cold)`: re-reading the
+/// context from a warm cache (0.1x base input price) vs rewriting it after
+/// expiry (1.25x for the 5-minute tier, 2x for the 1-hour tier). Output
+/// tokens are unknowable in advance and deliberately excluded.
+fn project_next_cost(tokens: u64, base_per_mtok: f64, ttl_secs: u64) -> (f64, f64) {
+    let mtok = tokens as f64 / 1_000_000.0;
+    let write_mult = if ttl_secs >= 3600 { 2.0 } else { 1.25 };
+    (mtok * base_per_mtok * 0.1, mtok * base_per_mtok * write_mult)
+}
+
+/// Compact money formatting for the projection: cents below a dollar
+/// (`20¢`), dollars above (`$4.00`), `<1¢` for dust. Rounds to integer cents
+/// first so the branch and the displayed value always agree.
+fn format_money(usd: f64) -> String {
+    let cents = (usd * 100.0).round() as u64;
+    if cents == 0 {
+        "<1¢".to_string()
+    } else if cents < 100 {
+        format!("{cents}¢")
+    } else {
+        format!("${}.{:02}", cents / 100, cents % 100)
     }
 }
 
@@ -588,12 +719,24 @@ fn cache_status(transcript_path: &str, has_rate_limits: bool) -> Option<(u64, u6
 /// Color escalates from gray through yellow/orange/red below 25%/10%/5% of
 /// TTL remaining; a snowflake `cold` once the cache has expired (the next
 /// message pays a cache rewrite).
-fn cache_display(remaining_secs: u64, ttl_secs: u64, break_at: &str) -> Option<String> {
+///
+/// `projection` is the preformatted `(warm, cold)` next-message cost. While
+/// warm it renders as `·warm→cold` — what the next message costs now vs what
+/// it will cost after expiry. Once cold, only the cold figure remains.
+fn cache_display(
+    remaining_secs: u64,
+    ttl_secs: u64,
+    break_at: &str,
+    projection: Option<(String, String)>,
+) -> Option<String> {
     if ttl_secs == 0 {
         return None;
     }
     if remaining_secs == 0 {
-        return Some(format!("{LIGHT_BLUE}\u{f0717} cold{RESET}"));
+        let cost = projection
+            .map(|(_, cold)| format!(" {GRAY}·{cold}{RESET}"))
+            .unwrap_or_default();
+        return Some(format!("{LIGHT_BLUE}\u{f0717} cold{RESET}{cost}"));
     }
     let color = if remaining_secs * 4 >= ttl_secs {
         GRAY
@@ -604,7 +747,10 @@ fn cache_display(remaining_secs: u64, ttl_secs: u64, break_at: &str) -> Option<S
     } else {
         RED
     };
-    Some(format!("{color}\u{f051b} {break_at}{RESET}"))
+    let cost = projection
+        .map(|(warm, cold)| format!(" {GRAY}·{warm}→{cold}{RESET}"))
+        .unwrap_or_default();
+    Some(format!("{color}\u{f051b} {break_at}{RESET}{cost}"))
 }
 
 /// Format an epoch timestamp as a compact local wall-clock time, e.g.
@@ -829,33 +975,33 @@ mod tests {
 
     #[test]
     fn cache_display_gray_while_warm() {
-        let warm = cache_display(3600, 3600, "3:42pm").expect("shown while warm");
+        let warm = cache_display(3600, 3600, "3:42pm", None).expect("shown while warm");
         assert!(warm.contains(GRAY) && warm.contains("3:42pm"));
-        let boundary = cache_display(900, 3600, "3:42pm").expect("shown at exactly 25%");
+        let boundary = cache_display(900, 3600, "3:42pm", None).expect("shown at exactly 25%");
         assert!(boundary.contains(GRAY));
     }
 
     #[test]
     fn cache_display_bands_one_hour() {
-        let yellow = cache_display(899, 3600, "3:42pm").expect("shown below 25%");
+        let yellow = cache_display(899, 3600, "3:42pm", None).expect("shown below 25%");
         assert!(yellow.contains(YELLOW) && yellow.contains("3:42pm"));
-        let orange = cache_display(300, 3600, "3:42pm").expect("shown below 10%");
+        let orange = cache_display(300, 3600, "3:42pm", None).expect("shown below 10%");
         assert!(orange.contains(ORANGE));
-        let red = cache_display(100, 3600, "3:42pm").expect("shown below 5%");
+        let red = cache_display(100, 3600, "3:42pm", None).expect("shown below 5%");
         assert!(red.contains(RED));
     }
 
     #[test]
     fn cache_display_bands_five_min() {
-        let yellow = cache_display(74, 300, "3:42pm").expect("shown below 25%");
+        let yellow = cache_display(74, 300, "3:42pm", None).expect("shown below 25%");
         assert!(yellow.contains(YELLOW));
-        let red = cache_display(10, 300, "3:42pm").expect("shown below 5%");
+        let red = cache_display(10, 300, "3:42pm", None).expect("shown below 5%");
         assert!(red.contains(RED));
     }
 
     #[test]
     fn cache_display_cold_after_expiry() {
-        let cold = cache_display(0, 3600, "3:42pm").expect("cold state shown");
+        let cold = cache_display(0, 3600, "3:42pm", None).expect("cold state shown");
         assert!(cold.contains(LIGHT_BLUE) && cold.contains("cold"));
         // The break time is in the past once cold; it must not be shown.
         assert!(!cold.contains("3:42pm"));
@@ -863,7 +1009,85 @@ mod tests {
 
     #[test]
     fn cache_display_zero_ttl_hidden() {
-        assert!(cache_display(0, 0, "3:42pm").is_none());
+        assert!(cache_display(0, 0, "3:42pm", None).is_none());
+    }
+
+    #[test]
+    fn cache_display_projection_warm_shows_both() {
+        let warm = cache_display(3600, 3600, "3:42pm", Some(("20¢".into(), "$4.00".into()))).expect("shown while warm");
+        assert!(warm.contains("·20¢→$4.00"));
+        assert!(warm.contains("3:42pm"));
+    }
+
+    #[test]
+    fn cache_display_projection_cold_shows_rebuild_only() {
+        let cold = cache_display(0, 3600, "3:42pm", Some(("20¢".into(), "$4.00".into()))).expect("cold state shown");
+        assert!(cold.contains("·$4.00"));
+        assert!(!cold.contains("20¢"));
+        assert!(!cold.contains('→'));
+    }
+
+    // --- next-message cost projection ---
+
+    #[test]
+    fn base_input_price_by_family() {
+        assert_eq!(base_input_price("Fable 5"), Some(10.0));
+        assert_eq!(base_input_price("Claude Mythos 5"), Some(10.0));
+        assert_eq!(base_input_price("Opus 4.5 (1M context)"), Some(5.0));
+        assert_eq!(base_input_price("Sonnet 5"), Some(3.0));
+        assert_eq!(base_input_price("Haiku 4.5"), Some(1.0));
+        assert_eq!(base_input_price("Mystery Model"), None);
+    }
+
+    #[test]
+    fn context_tokens_prefers_usage_breakdown() {
+        let ctx: ContextWindow = serde_json::from_str(
+            r#"{"context_window_size": 1000000, "used_percentage": 50.0,
+                "current_usage": {"input_tokens": 100000, "cache_creation_input_tokens": 50000, "cache_read_input_tokens": 50000}}"#,
+        )
+        .expect("ctx deserializes");
+        assert_eq!(context_tokens(&ctx), Some(200_000));
+    }
+
+    #[test]
+    fn context_tokens_falls_back_to_percentage() {
+        let ctx: ContextWindow = serde_json::from_str(r#"{"context_window_size": 1000000, "used_percentage": 20.0}"#)
+            .expect("ctx deserializes");
+        assert_eq!(context_tokens(&ctx), Some(200_000));
+    }
+
+    #[test]
+    fn context_tokens_absent_when_no_data() {
+        let ctx: ContextWindow = serde_json::from_str(r#"{"context_window_size": 1000000}"#).expect("ctx deserializes");
+        assert_eq!(context_tokens(&ctx), None);
+    }
+
+    #[test]
+    fn project_next_cost_one_hour_tier() {
+        // 200k tokens on Fable 5 ($10/MTok), 1h cache: warm 0.1x, cold 2x.
+        let (warm, cold) = project_next_cost(200_000, 10.0, 3600);
+        assert!((warm - 0.20).abs() < 1e-9);
+        assert!((cold - 4.00).abs() < 1e-9);
+    }
+
+    #[test]
+    fn project_next_cost_five_min_tier() {
+        // 100k tokens on Sonnet ($3/MTok), 5m cache: warm 0.1x, cold 1.25x.
+        let (warm, cold) = project_next_cost(100_000, 3.0, 300);
+        assert!((warm - 0.03).abs() < 1e-9);
+        assert!((cold - 0.375).abs() < 1e-9);
+    }
+
+    #[test]
+    fn format_money_bands() {
+        assert_eq!(format_money(0.0), "<1¢");
+        assert_eq!(format_money(0.004), "<1¢");
+        assert_eq!(format_money(0.03), "3¢");
+        assert_eq!(format_money(0.20), "20¢");
+        assert_eq!(format_money(0.994), "99¢");
+        assert_eq!(format_money(0.996), "$1.00");
+        assert_eq!(format_money(4.0), "$4.00");
+        assert_eq!(format_money(12.345), "$12.35");
     }
 
     // --- format_break_time ---
@@ -1168,6 +1392,75 @@ mod tests {
         let output = render(&input);
         // Agent icon should not appear for empty name
         assert!(!output.contains("\u{f06a9}"));
+    }
+
+    // --- dynamic layout ---
+
+    fn layout_input() -> StatusInput {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "context_window": {"context_window_size": 200000, "used_percentage": 20.0},
+            "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000}
+        }"#;
+        serde_json::from_str(json).expect("JSON deserializes")
+    }
+
+    #[test]
+    fn statusline_splits_accounting_when_width_unknown() {
+        let output = render_with_width(&layout_input(), None);
+        let (first, second) = output.split_once('\n').expect("output has two lines");
+        assert!(first.contains("Opus"));
+        assert!(first.contains("20%"));
+        assert!(second.contains("3.50"));
+        assert!(second.contains("2m"));
+    }
+
+    #[test]
+    fn statusline_single_line_in_wide_terminal() {
+        let output = render_with_width(&layout_input(), Some(400));
+        assert!(!output.contains('\n'));
+        assert!(output.contains("Opus"));
+        assert!(output.contains("3.50"));
+    }
+
+    #[test]
+    fn statusline_splits_in_narrow_terminal() {
+        let output = render_with_width(&layout_input(), Some(40));
+        assert!(output.contains('\n'));
+    }
+
+    #[test]
+    fn statusline_layout_respects_comfort_margin() {
+        let input = layout_input();
+        let single = render_with_width(&input, Some(400));
+        let width = visible_width(&single);
+        // Exactly at width + margin: still a single line.
+        assert!(!render_with_width(&input, Some(width + COMFORT_MARGIN)).contains('\n'));
+        // One column tighter: split.
+        assert!(render_with_width(&input, Some(width + COMFORT_MARGIN - 1)).contains('\n'));
+    }
+
+    #[test]
+    fn statusline_single_line_without_accounting_data() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("JSON deserializes");
+        // No accounting components: one line regardless of width.
+        assert!(!render_with_width(&input, None).contains('\n'));
+        assert!(!render_with_width(&input, Some(40)).contains('\n'));
+    }
+
+    #[test]
+    fn visible_width_ignores_ansi_escapes() {
+        assert_eq!(visible_width("abc"), 3);
+        assert_eq!(visible_width(&format!("{RED}abc{RESET}")), 3);
+        assert_eq!(visible_width(&format!("{ORANGE}x{RESET} {GRAY}y{RESET}")), 3);
+        assert_eq!(visible_width(""), 0);
+        // Nerd Font glyph + text, wrapped in 256-color escapes.
+        assert_eq!(visible_width(&format!("{LIGHT_MAGENTA}\u{f49b} 22%{RESET}")), 5);
     }
 
     // --- effort, thinking ---
