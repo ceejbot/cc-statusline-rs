@@ -1,5 +1,5 @@
 name = "cc-statusline-rs"
-version = "0.6.0"
+version = "0.6.1"
 description = "An opinionated ANSI statusline for Claude Code"
 homepage = "https://github.com/ceejbot/cc-statusline-rs"
 license = "Apache-2.0"
