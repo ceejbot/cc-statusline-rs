@@ -31,7 +31,7 @@ version BUMP:
     tomato set package.version "$version" Cargo.toml &> /dev/null
     tomato set version "$version" .formulaic.toml &> /dev/null
     cargo generate-lockfile
-    git commit Cargo.toml Cargo.lock -m "v${version}"
+    git commit Cargo.toml Cargo.lock .formulaic.toml -m "v${version}"
     git tag "v${version}"
     printf "Release tagged for version {{ BOLD_YELLOW }}v${version}{{ RESET }}\n"
 
