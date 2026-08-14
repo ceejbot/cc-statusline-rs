@@ -359,6 +359,20 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
         })
         .unwrap_or_default();
 
+    let cache_perf_display = input
+        .context_window
+        .as_ref()
+        .and_then(|c| c.current_usage.as_ref())
+        .and_then(cache_hit_rate)
+        .map(|pct| {
+            format!(
+                "{LIGHT_CYAN}\u{f0633} {}{}%{RESET}",
+                hit_rate_color(pct),
+                pct.round() as u32
+            )
+        })
+        .unwrap_or_default();
+
     let cache_break_display = input
         .transcript_path
         .as_deref()
@@ -482,7 +496,7 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
     // Line 2 is accounting: money, time, limits, and the cache clock. Long
     // branch names crowd line 1, so the whole block lives below it.
     let line2: Vec<String> = [
-        cost_display, agent_display, duration_display, rate_limits_display, cache_break_display,
+        cost_display, agent_display, duration_display, rate_limits_display, cache_perf_display, cache_break_display,
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -536,6 +550,21 @@ fn pct_color(pct: f64) -> &'static str {
         YELLOW
     } else {
         GRAY
+    }
+}
+
+/// Inverse of `pct_color`: for the cache hit rate, high is good. A warm
+/// mid-session turn sits in the high 90s; anything below 90 means the prefix
+/// changed, and a rebuild turn drops toward zero.
+fn hit_rate_color(pct: f64) -> &'static str {
+    if pct >= 90.0 {
+        GREEN
+    } else if pct >= 50.0 {
+        YELLOW
+    } else if pct >= 20.0 {
+        ORANGE
+    } else {
+        RED
     }
 }
 
@@ -635,6 +664,15 @@ fn context_tokens(ctx: &ContextWindow) -> Option<u64> {
                 .map(|pct| (pct / 100.0 * ctx.context_window_size as f64) as u64)
         })
         .filter(|&t| t > 0)
+}
+
+/// Share of the last turn's prompt served from the cache, as a percentage.
+/// `input_tokens` counts against the rate: it was neither read from nor
+/// found in the cache. None when all counters are zero (session start, or
+/// caching disabled) — there is no performance to judge yet.
+fn cache_hit_rate(usage: &CurrentUsage) -> Option<f64> {
+    let total = usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+    (total > 0).then(|| usage.cache_read_input_tokens as f64 * 100.0 / total as f64)
 }
 
 /// Input-side cost of the next message as `(warm, cold)`: re-reading the
@@ -1158,6 +1196,69 @@ mod tests {
     fn context_tokens_absent_when_no_data() {
         let ctx: ContextWindow = serde_json::from_str(r#"{"context_window_size": 1000000}"#).expect("ctx deserializes");
         assert_eq!(context_tokens(&ctx), None);
+    }
+
+    // --- cache hit rate ---
+
+    #[test]
+    fn cache_hit_rate_warm_turn() {
+        let usage: CurrentUsage = serde_json::from_str(
+            r#"{"input_tokens": 500, "cache_creation_input_tokens": 2000, "cache_read_input_tokens": 190000}"#,
+        )
+        .expect("usage deserializes");
+        let rate = cache_hit_rate(&usage).expect("warm turn has a rate");
+        assert!((rate - 98.7).abs() < 0.1);
+    }
+
+    #[test]
+    fn cache_hit_rate_rebuild_turn() {
+        let usage: CurrentUsage = serde_json::from_str(
+            r#"{"input_tokens": 0, "cache_creation_input_tokens": 140000, "cache_read_input_tokens": 0}"#,
+        )
+        .expect("usage deserializes");
+        assert_eq!(cache_hit_rate(&usage), Some(0.0));
+    }
+
+    #[test]
+    fn cache_hit_rate_none_without_data() {
+        assert_eq!(cache_hit_rate(&CurrentUsage::default()), None);
+    }
+
+    #[test]
+    fn hit_rate_color_bands() {
+        assert_eq!(hit_rate_color(98.0), GREEN);
+        assert_eq!(hit_rate_color(90.0), GREEN);
+        assert_eq!(hit_rate_color(89.9), YELLOW);
+        assert_eq!(hit_rate_color(50.0), YELLOW);
+        assert_eq!(hit_rate_color(49.9), ORANGE);
+        assert_eq!(hit_rate_color(20.0), ORANGE);
+        assert_eq!(hit_rate_color(3.0), RED);
+    }
+
+    #[test]
+    fn statusline_cache_hit_rate_shown() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {
+                "context_window_size": 200000,
+                "current_usage": {"input_tokens": 500, "cache_creation_input_tokens": 1500, "cache_read_input_tokens": 198000}
+            }
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("JSON deserializes");
+        let output = render_with_width(&input, None);
+        // 198000/200000 = 99%, green, on the accounting line.
+        let (_, accounting) = output.split_once('\n').expect("accounting line present");
+        assert!(accounting.contains(&format!("\u{f0633} {GREEN}99%")));
+    }
+
+    #[test]
+    fn statusline_cache_hit_rate_hidden_without_usage() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "context_window": {"context_window_size": 200000, "used_percentage": 20.0}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("JSON deserializes");
+        assert!(!render_with_width(&input, None).contains('\u{f0633}'));
     }
 
     #[test]

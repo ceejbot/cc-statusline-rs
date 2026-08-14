@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project Overview
 
-A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline in one or two lines depending on terminal width. Line 1 (identity): working directory (fish-style shortened), git branch, worktree indicator, lines changed, model name, context window usage (progress bar + percentage). Line 2 (accounting): session cost, agent name, session duration, rate limits, and the cache clock with a projected next-message cost (warm vs cold). When everything fits the terminal comfortably on one line, both groups render as a single line.
+A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline in one or two lines depending on terminal width. Line 1 (identity): working directory (fish-style shortened), git branch, worktree indicator, lines changed, model name, context window usage (progress bar + percentage). Line 2 (accounting): session cost, agent name, session duration, rate limits, the last turn's cache hit rate, and the cache clock with a projected next-message cost (warm vs cold). When everything fits the terminal comfortably on one line, both groups render as a single line.
 
 ## Key Commands
 
@@ -39,7 +39,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 | `Model` | `display_name: Option<String>` | Model name shown in statusline; `" (1M context)"` is stripped |
 | `OutputStyle` | `name: Option<String>` | Style label (e.g. "explanatory") shown in parens |
 | `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data; bar shows a `┊` tick at the 200k boundary when `context_window_size > 200000` |
-| `CurrentUsage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` | Token breakdown for manual % calculation |
+| `CurrentUsage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` | Token breakdown for manual % calculation; also feeds the cache hit-rate indicator |
 | `Cost` | `total_cost_usd`, `total_duration_ms`, `total_lines_added`, `total_lines_removed` | Session cost and line change stats |
 | `Worktree` | `name` | Worktree indicator |
 | `Agent` | `name: Option<String>` | Agent name when running as a sub-agent |
@@ -53,7 +53,7 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 ### Statusline Assembly
 
-`render()` builds these display components, joining non-empty ones with `•` separators. Layout is dynamic: if the fully assembled single line fits the terminal width (`COLUMNS` env var, set by Claude Code since v2.1.153) with `COMFORT_MARGIN` (4 columns) of slack, everything stays on one line. Otherwise — or when `COLUMNS` is absent/unparseable — the components split: line 1 carries components 1–6 (identity: location, model, context), line 2 carries components 7–11 (accounting: money, time, limits, cache). Width is measured with `visible_width()`, which counts ANSI escapes as zero cells. The second line is emitted only when it has content. Claude Code renders each stdout line as its own statusline row. The vim badge is prepended outside the bullet-joined sequence:
+`render()` builds these display components, joining non-empty ones with `•` separators. Layout is dynamic: if the fully assembled single line fits the terminal width (`COLUMNS` env var, set by Claude Code since v2.1.153) with `COMFORT_MARGIN` (4 columns) of slack, everything stays on one line. Otherwise — or when `COLUMNS` is absent/unparseable — the components split: line 1 carries components 1–6 (identity: location, model, context), line 2 carries components 7–12 (accounting: money, time, limits, cache). Width is measured with `visible_width()`, which counts ANSI escapes as zero cells. The second line is emitted only when it has content. Claude Code renders each stdout line as its own statusline row. The vim badge is prepended outside the bullet-joined sequence:
 
 1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
 2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
@@ -65,7 +65,8 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 8. **Agent**: Agent name in gray with icon
 9. **Duration**: Formatted as `Nh Mm` or `<1m`, from `total_duration_ms`
 10. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`. Each window appends a gray reset countdown (e.g. `·2h 12m`, day-aware as `·5d 2h`) glued to its percentage, shown only when that window is ≥50% used and `resets_at` is in the future (a stale/elapsed timestamp degrades to no countdown)
-11. **Cache break**: the local wall-clock time the prompt cache will expire (e.g. `󰔛 3:42pm`), from `transcript_path`. Last activity = transcript mtime; TTL tier detected from the last nonzero `"cache_creation"` bucket in the transcript tail (`ephemeral_1h_input_tokens` → 1h, `ephemeral_5m_input_tokens` → 5m), falling back to env overrides (`FORCE_PROMPT_CACHING_5M`, `ENABLE_PROMPT_CACHING_1H`) then a plan heuristic (rate limits present → 1h, else 5m). Always visible (an absolute time stays true even when the statusline isn't refreshing): gray while >25% of TTL remains, yellow <25%, orange <10%, red <5%; `󰜗 cold` in light blue after expiry. `DISABLE_PROMPT_CACHING=1` or an unreadable transcript suppresses it entirely. Pairs with `statusLine.refreshInterval` (e.g. 10s) in settings so the color bands and `cold` flip stay current while the session is idle. **Next-message cost projection** glued on in gray: while warm `·20¢→$4.00` (context re-read at the warm cache-read rate → rebuild at the cold cache-write rate), after expiry just `·$4.00`. Input-side only (output tokens are unknowable); context tokens from `current_usage` (fallback: `used_percentage` × window); rate = family base input price (Fable/Mythos $10, Opus $5, Sonnet $3, Haiku $1 per MTok, matched on `display_name`) × 0.1 warm, × 1.25 (5m tier) or 2.0 (1h tier) cold. Unknown model family suppresses the projection, not the clock
+11. **Cache hit rate**: `󰘳 NN%` — share of the last turn's prompt served from the cache, `cache_read / (input + cache_creation + cache_read)` from `current_usage`, via `cache_hit_rate()`. Color-coded on an inverted scale via `hit_rate_color()` (green ≥90%, yellow ≥50%, orange ≥20%, red below): a warm turn sits in the high 90s, a cache-busting turn (model/effort switch, `/compact`, MCP change) shows as a red single-digit for one turn. Suppressed when `current_usage` is absent or all counters are zero
+12. **Cache break**: the local wall-clock time the prompt cache will expire (e.g. `󰔛 3:42pm`), from `transcript_path`. Last activity = transcript mtime; TTL tier detected from the last nonzero `"cache_creation"` bucket in the transcript tail (`ephemeral_1h_input_tokens` → 1h, `ephemeral_5m_input_tokens` → 5m), falling back to env overrides (`FORCE_PROMPT_CACHING_5M`, `ENABLE_PROMPT_CACHING_1H`) then a plan heuristic (rate limits present → 1h, else 5m). Always visible (an absolute time stays true even when the statusline isn't refreshing): gray while >25% of TTL remains, yellow <25%, orange <10%, red <5%; `󰜗 cold` in light blue after expiry. `DISABLE_PROMPT_CACHING=1` or an unreadable transcript suppresses it entirely. Pairs with `statusLine.refreshInterval` (e.g. 10s) in settings so the color bands and `cold` flip stay current while the session is idle. **Next-message cost projection** glued on in gray: while warm `·20¢→$4.00` (context re-read at the warm cache-read rate → rebuild at the cold cache-write rate), after expiry just `·$4.00`. Input-side only (output tokens are unknowable); context tokens from `current_usage` (fallback: `used_percentage` × window); rate = family base input price (Fable/Mythos $10, Opus $5, Sonnet $3, Haiku $1 per MTok, matched on `display_name`) × 0.1 warm, × 1.25 (5m tier) or 2.0 (1h tier) cold. Unknown model family suppresses the projection, not the clock
 
 ### ANSI Colors
 
@@ -85,6 +86,8 @@ All internal; only `statusline()` is `pub`.
 - `parse_git_status(stdout)` — Pure parser for porcelain v2 output, isolated for testing
 - `fish_shorten_path(path)` — Strips `$HOME` prefix to `~`, shortens intermediate dirs to first char (hidden dirs keep dot + first char)
 - `pct_color(f64)` — Maps a percentage to one of red/orange/yellow/gray; shared by context bar and rate limits
+- `hit_rate_color(f64)` — Inverse scale for the cache hit rate (high = good): green ≥90, yellow ≥50, orange ≥20, red below
+- `cache_hit_rate(usage)` — Share of the last turn's prompt served from cache as a percentage; `None` when all counters are zero
 - `format_cost(f64)` — 3 decimal places below $0.01, 2 above
 - `format_duration(ms)` — Formats milliseconds as `Nh Mm`, `Nm`, or `<1m`
 - `format_reset(secs)` — Day-aware rate-limit reset countdown: `Nd Nh`, `Nh Mm`, `Nm`, or `<1m` (rolls into days, unlike `format_duration`)
@@ -101,10 +104,10 @@ All internal; only `statusline()` is `pub`.
 
 ```
 [N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • 󰊭 Model·ultra✻ (style) • 󱦛 ███┊░░░░░░░░░░░░ 22%
-󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78%·2h 12m · 7d 34% • 󰔛 3:42pm ·20¢→$4.00
+󰊖 $7.50 • 󰚩 agent • 󰔚 15m • 5h 78%·2h 12m · 7d 34% • 󰘳 98% • 󰔛 3:42pm ·20¢→$4.00
 ```
 
-Claude Code renders each stdout line as a separate statusline row. The split happens only when the single line wouldn't fit `COLUMNS` minus the comfort margin; in a wide terminal the same components render as one bullet-joined line. Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, rate limits, cache-break time, and the cost projection all degrade to nothing when their fields aren't present in the JSON; the entire second line disappears when it has no components.
+Claude Code renders each stdout line as a separate statusline row. The split happens only when the single line wouldn't fit `COLUMNS` minus the comfort margin; in a wide terminal the same components render as one bullet-joined line. Components are suppressed when their data is absent: vim badge, effort suffix, thinking glyph, rate limits, cache hit rate, cache-break time, and the cost projection all degrade to nothing when their fields aren't present in the JSON; the entire second line disappears when it has no components.
 
 ## Dependencies
 

@@ -57,6 +57,7 @@ The second group is accounting:
 - **Agent name**, when running as a sub-agent
 - **Session duration**
 - **Rate-limit windows** (5h and 7d) with usage percentages, plus a reset countdown once a window passes half used — subscribers only; API users never see this
+- **Cache hit rate** (`󰘳 98%`): how much of your last message was served from the prompt cache. Green in the high 90s means caching is working; a sudden red single-digit means something broke your prefix — a model or effort switch, `/compact`, an MCP server change — and that turn paid to rebuild it.
 - **Cache expiry**: the local wall-clock time your prompt cache goes cold (`󰔛 3:42pm`), so you know whether your next message reheats a warm cache or pays to rebuild it. Shifts gray → yellow → orange → red as expiry approaches, then flips to `󰜗 cold`.
 - **Next-message cost**, glued to the cache clock: `·20¢→$4.00` is what re-sending your context costs against a warm cache versus what it will cost after expiry. Once cold, only the rebuild figure remains.
 
