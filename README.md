@@ -38,7 +38,7 @@ From a clone, `just install` builds from source, copies the binary to `~/.claude
 
 ## What it shows
 
-<img alt="a statusline showing a shortened path, a dirty git branch with +38 -19 lines changed, the model Fable 5 with thinking glyph, a context bar at 6% with the 200k tick, $1.51 session cost, 1h 10m duration, and an 11:55am cache expiry" src="short_example.png" />
+<img alt="a single-line statusline showing a shortened path, a git branch three commits ahead with +292 -186 lines changed, the model Fable 5, a context bar at 19% with the 200k tick, $20.65 session cost in red, a 100% cache hit rate in green with a recycle icon, a 1:09am cache expiry, and a next-message cost of 19¢ in gold fading to $3.90 after expiry" src="example.png" />
 
 The components come in two groups, and the layout adapts: when the whole thing fits your terminal width with room to spare, it renders as one line; when it doesn't (long branch names were crowding the money out), the groups split into two.
 
@@ -48,18 +48,17 @@ The first group is identity — where you are, what the model is doing:
 - **Working directory**, fish-style shortened (`~/c/f/cc-statusline-rs`)
 - **Git branch**, with a red `*` when dirty, `↑`/`↓` ahead-behind counts, a `↟name` worktree marker, and a `#1234` PR badge colored by review state
 - **Lines added and removed** this session
-- **Model name**, with a reasoning-effort suffix (`·max`), a `✻` glyph when extended thinking is on, and the output style in parens
+- **Model name**, with a reasoning-effort suffix (`·max`) and the output style in parens — both shown only when they deviate from the defaults
 - **Context-window usage** as a progress bar with a percentage, color-shifting as it fills; 1M-context models get a `┊` tick at the 200k boundary
 
 The second group is accounting:
 
 - **Session cost** in dollars, color-coded by how much you should wince
 - **Agent name**, when running as a sub-agent
-- **Session duration**
 - **Rate-limit windows** (5h and 7d) with usage percentages, plus a reset countdown once a window passes half used — subscribers only; API users never see this
-- **Cache hit rate** (`󰘳 98%`): how much of your last message was served from the prompt cache. Green in the high 90s means caching is working; a sudden red single-digit means something broke your prefix — a model or effort switch, `/compact`, an MCP server change — and that turn paid to rebuild it.
+- **Cache hit rate** (`󰑌 98%`): how much of your last message was served from the prompt cache. Green in the high 90s means caching is working; a sudden red single-digit means something broke your prefix — a model or effort switch, `/compact`, an MCP server change — and that turn paid to rebuild it.
 - **Cache expiry**: the local wall-clock time your prompt cache goes cold (`󰔛 3:42pm`), so you know whether your next message reheats a warm cache or pays to rebuild it. Shifts gray → yellow → orange → red as expiry approaches, then flips to `󰜗 cold`.
-- **Next-message cost**, glued to the cache clock: `·20¢→$4.00` is what re-sending your context costs against a warm cache versus what it will cost after expiry. Once cold, only the rebuild figure remains.
+- **Next-message cost**, glued to the cache clock: `·20¢→$4.00` is what re-sending your context costs against a warm cache versus what it will cost after expiry. The figure that applies right now renders gold; the one that merely looms stays gray. Once cold, only the rebuild figure remains — in gold, because it is now the floor.
 
 Components with no data vanish from the line, and an empty second line vanishes entirely. In a fresh session outside a git repo, you get one short line; deep in a long session in a narrow terminal, you get the full two-row instrument panel. The width check reads the `COLUMNS` environment variable, which Claude Code sets for statusline processes (v2.1.153+); absent that, you get the split layout.
 

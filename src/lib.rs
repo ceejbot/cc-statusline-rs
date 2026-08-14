@@ -32,7 +32,6 @@ struct StatusInput {
     worktree: Option<Worktree>,
     agent: Option<Agent>,
     effort: Option<Effort>,
-    thinking: Option<Thinking>,
     vim: Option<Vim>,
     rate_limits: Option<RateLimits>,
     pr: Option<Pr>,
@@ -78,7 +77,6 @@ struct CurrentUsage {
 #[serde(default)]
 struct Cost {
     total_cost_usd: f64,
-    total_duration_ms: Option<u64>,
     total_lines_added: u64,
     total_lines_removed: u64,
 }
@@ -106,12 +104,6 @@ struct Pr {
 #[serde(default)]
 struct Effort {
     level: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Thinking {
-    enabled: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -223,16 +215,16 @@ fn model_display(input: &StatusInput) -> String {
         .filter(|&l| l != "high")
         .map(|l| format!("·{l}"))
         .unwrap_or_default();
-    let thinking_glyph = if input.thinking.as_ref().is_some_and(|t| t.enabled) {
-        "✻"
-    } else {
-        ""
-    };
-    let style_suffix = match input.output_style.name {
-        Some(ref style) => format!(" {GRAY}({style}){RESET}"),
-        None => String::new(),
-    };
-    format!("{LIGHT_CYAN}\u{e26d} {ORANGE}{model}{effort_suffix}{thinking_glyph}{style_suffix}")
+    // The style badge marks deviation: the default style is the norm and
+    // saying so is noise.
+    let style_suffix = input
+        .output_style
+        .name
+        .as_deref()
+        .filter(|s| !s.eq_ignore_ascii_case("default"))
+        .map(|style| format!(" {GRAY}({style}){RESET}"))
+        .unwrap_or_default();
+    format!("{ORANGE}{model}{effort_suffix}{style_suffix}")
 }
 
 fn context_display(ctx: &ContextWindow) -> String {
@@ -366,7 +358,7 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
         .and_then(cache_hit_rate)
         .map(|pct| {
             format!(
-                "{LIGHT_CYAN}\u{f0633} {}{}%{RESET}",
+                "{LIGHT_CYAN}\u{f044c} {}{}%{RESET}",
                 hit_rate_color(pct),
                 pct.round() as u32
             )
@@ -471,17 +463,6 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
         .map(|n| format!("{LIGHT_CYAN}\u{f06a9} {GRAY}{n}{RESET}"))
         .unwrap_or_default();
 
-    let duration_display = input
-        .cost
-        .as_ref()
-        .and_then(|c| c.total_duration_ms)
-        .filter(|&ms| ms > 0)
-        .map(|ms| {
-            let formatted = format_duration(ms);
-            format!("{GRAY}\u{f0150} {formatted}{RESET}")
-        })
-        .unwrap_or_default();
-
     let sep = format!(" {GRAY}• {RESET}");
 
     // Line 1 is identity: where you are and what the model is doing.
@@ -493,10 +474,10 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
     .filter(|s| !s.is_empty())
     .collect();
 
-    // Line 2 is accounting: money, time, limits, and the cache clock. Long
+    // Line 2 is accounting: money, limits, and the cache clock. Long
     // branch names crowd line 1, so the whole block lives below it.
     let line2: Vec<String> = [
-        cost_display, agent_display, duration_display, rate_limits_display, cache_perf_display, cache_break_display,
+        cost_display, agent_display, rate_limits_display, cache_perf_display, cache_break_display,
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -699,22 +680,8 @@ fn format_money(usd: f64) -> String {
     }
 }
 
-fn format_duration(ms: u64) -> String {
-    let total_secs = ms / 1000;
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        "<1m".to_string()
-    }
-}
-
-/// Day-aware countdown for a rate-limit window reset. Unlike `format_duration`
-/// (which renders `167h 0m` for multi-day spans), this rolls into days so the
-/// 7-day window reads as e.g. `2d 5h`.
+/// Day-aware countdown for a rate-limit window reset: rolls into days so the
+/// 7-day window reads as e.g. `2d 5h` rather than `53h 0m`.
 fn format_reset(secs: u64) -> String {
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3600;
@@ -834,7 +801,9 @@ fn cache_status(transcript_path: &str, has_rate_limits: bool) -> Option<(u64, u6
 ///
 /// `projection` is the preformatted `(warm, cold)` next-message cost. While
 /// warm it renders as `·warm→cold` — what the next message costs now vs what
-/// it will cost after expiry. Once cold, only the cold figure remains.
+/// it will cost after expiry. Once cold, only the cold figure remains. The
+/// figure that is currently true renders gold (the line's money color); the
+/// one that merely looms stays gray.
 fn cache_display(
     remaining_secs: u64,
     ttl_secs: u64,
@@ -846,7 +815,7 @@ fn cache_display(
     }
     if remaining_secs == 0 {
         let cost = projection
-            .map(|(_, cold)| format!(" {GRAY}·{cold}{RESET}"))
+            .map(|(_, cold)| format!(" {GRAY}·{GOLD}{cold}{RESET}"))
             .unwrap_or_default();
         return Some(format!("{LIGHT_BLUE}\u{f0717} cold{RESET}{cost}"));
     }
@@ -860,7 +829,7 @@ fn cache_display(
         RED
     };
     let cost = projection
-        .map(|(warm, cold)| format!(" {GRAY}·{warm}→{cold}{RESET}"))
+        .map(|(warm, cold)| format!(" {GRAY}·{GOLD}{warm}{GRAY}→{cold}{RESET}"))
         .unwrap_or_default();
     Some(format!("{color}\u{f051b} {break_at}{RESET}{cost}"))
 }
@@ -939,29 +908,6 @@ mod tests {
     fn format_cost_above_threshold() {
         assert_eq!(format_cost(0.99), "0.99");
         assert_eq!(format_cost(19.99), "19.99");
-    }
-
-    // --- format_duration ---
-
-    #[test]
-    fn format_duration_under_one_minute() {
-        assert_eq!(format_duration(0), "<1m");
-        assert_eq!(format_duration(500), "<1m");
-        assert_eq!(format_duration(59_999), "<1m");
-    }
-
-    #[test]
-    fn format_duration_minutes_only() {
-        assert_eq!(format_duration(60_000), "1m");
-        assert_eq!(format_duration(945_000), "15m");
-        assert_eq!(format_duration(3_599_000), "59m");
-    }
-
-    #[test]
-    fn format_duration_hours_and_minutes() {
-        assert_eq!(format_duration(3_600_000), "1h 0m");
-        assert_eq!(format_duration(5_400_000), "1h 30m");
-        assert_eq!(format_duration(7_200_000), "2h 0m");
     }
 
     // --- format_reset ---
@@ -1151,14 +1097,16 @@ mod tests {
     #[test]
     fn cache_display_projection_warm_shows_both() {
         let warm = cache_display(3600, 3600, "3:42pm", Some(("20¢".into(), "$4.00".into()))).expect("shown while warm");
-        assert!(warm.contains("·20¢→$4.00"));
+        // The currently-true figure is gold; the looming one stays gray.
+        assert!(warm.contains(&format!("·{GOLD}20¢{GRAY}→$4.00")));
         assert!(warm.contains("3:42pm"));
     }
 
     #[test]
     fn cache_display_projection_cold_shows_rebuild_only() {
         let cold = cache_display(0, 3600, "3:42pm", Some(("20¢".into(), "$4.00".into()))).expect("cold state shown");
-        assert!(cold.contains("·$4.00"));
+        // Once cold, the rebuild figure is the current floor: gold.
+        assert!(cold.contains(&format!("·{GOLD}$4.00")));
         assert!(!cold.contains("20¢"));
         assert!(!cold.contains('→'));
     }
@@ -1248,7 +1196,7 @@ mod tests {
         let output = render_with_width(&input, None);
         // 198000/200000 = 99%, green, on the accounting line.
         let (_, accounting) = output.split_once('\n').expect("accounting line present");
-        assert!(accounting.contains(&format!("\u{f0633} {GREEN}99%")));
+        assert!(accounting.contains(&format!("\u{f044c} {GREEN}99%")));
     }
 
     #[test]
@@ -1258,7 +1206,7 @@ mod tests {
             "context_window": {"context_window_size": 200000, "used_percentage": 20.0}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("JSON deserializes");
-        assert!(!render_with_width(&input, None).contains('\u{f0633}'));
+        assert!(!render_with_width(&input, None).contains('\u{f044c}'));
     }
 
     #[test]
@@ -1338,7 +1286,7 @@ mod tests {
             "model": {"display_name": "Sonnet"},
             "output_style": {"name": "concise"},
             "context_window": {"context_window_size": 200000, "used_percentage": 42.5},
-            "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5},
+            "cost": {"total_cost_usd": 3.50, "total_lines_added": 10, "total_lines_removed": 5},
             "worktree": {"name": "feat", "branch": "feat-branch"},
             "agent": {"name": "reviewer"},
             "pr": {"number": 99, "url": "https://example.com/pull/99", "review_state": "pending"}
@@ -1354,10 +1302,6 @@ mod tests {
             Some(42.5)
         );
         assert_eq!(input.cost.as_ref().expect("cost present").total_cost_usd, 3.50);
-        assert_eq!(
-            input.cost.as_ref().expect("cost present").total_duration_ms,
-            Some(120000)
-        );
         assert_eq!(
             input.worktree.as_ref().expect("worktree present").name.as_deref(),
             Some("feat")
@@ -1498,12 +1442,11 @@ mod tests {
     fn statusline_with_cost() {
         let json = r#"{
             "workspace": {"current_dir": "/tmp"},
-            "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000, "total_lines_added": 10, "total_lines_removed": 5}
+            "cost": {"total_cost_usd": 3.50, "total_lines_added": 10, "total_lines_removed": 5}
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("cost JSON should deserialize");
         let output = render(&input);
         assert!(output.contains("3.50"));
-        assert!(output.contains("2m"));
         // lines_changed only shown next to git branch; /tmp is not a git repo
         // so +10 -5 won't appear in output for non-git dirs
     }
@@ -1600,7 +1543,7 @@ mod tests {
             "workspace": {"current_dir": "/tmp"},
             "model": {"display_name": "Opus"},
             "context_window": {"context_window_size": 200000, "used_percentage": 20.0},
-            "cost": {"total_cost_usd": 3.50, "total_duration_ms": 120000}
+            "cost": {"total_cost_usd": 3.50}
         }"#;
         serde_json::from_str(json).expect("JSON deserializes")
     }
@@ -1612,7 +1555,6 @@ mod tests {
         assert!(first.contains("Opus"));
         assert!(first.contains("20%"));
         assert!(second.contains("3.50"));
-        assert!(second.contains("2m"));
     }
 
     #[test]
@@ -1690,27 +1632,28 @@ mod tests {
     }
 
     #[test]
-    fn statusline_thinking_glyph_when_enabled() {
+    fn statusline_default_style_suppressed() {
         let json = r#"{
             "workspace": {"current_dir": "/tmp"},
             "model": {"display_name": "Opus"},
-            "thinking": {"enabled": true}
+            "output_style": {"name": "default"}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).expect("thinking JSON deserializes");
+        let input: StatusInput = serde_json::from_str(json).expect("style JSON deserializes");
         let output = render(&input);
-        assert!(output.contains("✻"));
+        assert!(!output.contains("(default)"));
+        assert!(output.contains("Opus"));
     }
 
     #[test]
-    fn statusline_thinking_glyph_hidden_when_disabled() {
+    fn statusline_nondefault_style_shown() {
         let json = r#"{
             "workspace": {"current_dir": "/tmp"},
             "model": {"display_name": "Opus"},
-            "thinking": {"enabled": false}
+            "output_style": {"name": "explanatory"}
         }"#;
-        let input: StatusInput = serde_json::from_str(json).expect("thinking-disabled JSON deserializes");
+        let input: StatusInput = serde_json::from_str(json).expect("style JSON deserializes");
         let output = render(&input);
-        assert!(!output.contains("✻"));
+        assert!(output.contains("(explanatory)"));
     }
 
     #[test]
