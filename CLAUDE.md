@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project Overview
 
-A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline in one or two lines depending on terminal width. Line 1 (identity): working directory (fish-style shortened), git branch, worktree indicator, lines changed, model name, context window usage (progress bar + percentage). Line 2 (accounting): session cost, agent name, rate limits, the last turn's cache hit rate, and the cache clock with a projected next-message cost (warm vs cold). When everything fits the terminal comfortably on one line, both groups render as a single line.
+A Rust statusline generator for Claude Code. Reads JSON from stdin, outputs an ANSI-colored statusline in one or two lines depending on terminal width. Line 1 (identity): working directory (fish-style shortened), git branch, lines changed, model name, context window usage (progress bar + token count). Line 2 (accounting): session cost, agent name, rate limits, the last turn's cache hit rate, and the cache clock with a projected next-message cost (warm vs cold). When everything fits the terminal comfortably on one line, both groups render as a single line.
 
 ## Key Commands
 
@@ -34,21 +34,24 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 | Struct | Key Fields | Purpose |
 |--------|------------|---------|
-| `StatusInput` | workspace, model, output_style, context_window, cost, worktree, agent, effort, vim, rate_limits | Top-level container |
-| `Workspace` | `current_dir: Option<String>`, `git_worktree: Option<String>` | Working directory (required for meaningful output); `git_worktree` is set when cwd is in a linked git worktree |
+| `StatusInput` | workspace, model, output_style, context_window, cost, agent, effort, thinking, vim, rate_limits, pr, transcript_path, fast_mode | Top-level container |
+| `Workspace` | `current_dir: Option<String>` | Working directory (required for meaningful output). `git_worktree` is deliberately ignored: the path already shows where you are |
 | `Model` | `display_name: Option<String>` | Model name shown in statusline; `" (1M context)"` is stripped |
 | `OutputStyle` | `name: Option<String>` | Style label (e.g. "explanatory") shown in parens; suppressed when it's `default` (the badge marks deviation, not the norm) |
-| `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data; bar shows a `┊` tick at the 200k boundary when `context_window_size > 200000` |
-| `CurrentUsage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` | Token breakdown for manual % calculation; also feeds the cache hit-rate indicator |
+| `ContextWindow` | `context_window_size`, `used_percentage`, `current_usage` | Context usage data: drives the bar fill (percentage) and the token figure beside it (`context_tokens()`); bar shows a `┊` tick at the 200k boundary when `context_window_size > 200000` |
+| `CurrentUsage` | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` | Token breakdown for the context figure and manual % fallback; also feeds the cache hit-rate indicator |
 | `Cost` | `total_cost_usd`, `total_lines_added`, `total_lines_removed` | Session cost and line change stats |
-| `Worktree` | `name` | Worktree indicator |
 | `Agent` | `name: Option<String>` | Agent name when running as a sub-agent |
-| `Pr` | `number: Option<u64>`, `review_state: Option<String>` | Open PR badge glued to the git branch; present only inside a git repo with an open PR. `url` is ignored (not displayable) |
+| `Pr` | `number: Option<u64>`, `review_state: Option<String>`, `kind: Option<String>` | Open PR badge glued to the git branch; present only inside a git repo with an open PR. `kind == "mr"` (GitLab, v2.1.234+) switches the sigil from `#` to `!`. `url` is ignored (not displayable) |
 | `Effort` | `level: Option<String>` | Reasoning effort suffix on model name (`·max`, `·ultra`, `·xhigh`, `·low`, `·medium`; `ultra` is the Opus 4.8 level); rendered generically for any value, with `high` (the default) suppressed |
+| `Thinking` | `enabled: Option<bool>` | `·nothink` suffix on the model name when explicitly `false`; absent means unknown and stays silent |
 | `Vim` | `mode: Option<String>` | Vim mode badge at the front of the line; maps `NORMAL/INSERT/VISUAL/VISUAL LINE` to `[N]/[I]/[V]/[V-L]` |
 | `RateLimits` | `five_hour`, `seven_day` (each `RateLimitWindow`) | Subscriber-only; absent for API users. Shown at the end of the line |
 | `RateLimitWindow` | `used_percentage: f64`, `resets_at: Option<u64>` | `used_percentage` color-coded with the same thresholds as the context bar. `resets_at` is a Unix epoch (seconds); rendered as a relative countdown, but only when the window is ≥50% used and the reset is still in the future |
 | (top-level) | `transcript_path: Option<String>` | Path to the session's JSONL transcript; feeds the cache-break indicator (mtime = last activity, tail = TTL evidence) |
+| (top-level) | `fast_mode: bool` | Fast mode on → Nerd Font bolt glued to the model name; `false`/absent → nothing |
+
+The remaining documented fields (`cwd`, `session_id`, `session_name` (the CLI already pins it above the input box), `prompt_id`, `version`, `model.id`, `workspace.project_dir/added_dirs/repo`, `context_window.total_*_tokens/remaining_percentage`, `cost.total_*_duration_ms`, `exceeds_200k_tokens`, `worktree.*`) are deliberately not parsed — nothing prompt-worthy to show. Schema reference: https://code.claude.com/docs/en/statusline
 
 ### Statusline Assembly
 
@@ -56,10 +59,10 @@ just ci                   # Run all CI checks (fmt, clippy, tests)
 
 1. **Vim badge** (prepended): `[N]/[I]/[V]/[V-L]` colored by mode; only shown when `vim.mode` is present
 2. **Path**: Fish-style shortened (`fish_shorten_path`), colored cyan
-3. **Git branch**: Via a single `git status --porcelain=v2 --branch` call, colored green. Decorations append in this order: `*` (red, when dirty), `↑N` (ahead), `↓M` (behind), `↟name` (worktree, from `worktree.name` or falling back to `workspace.git_worktree`), `#N` (PR badge, from `pr.number`, colored by `pr.review_state`: approved=green, changes_requested=red, pending=yellow, draft/absent=gray)
+3. **Git branch**: Via a single `git status --porcelain=v2 --branch` call, colored green. Decorations append in this order: `*` (red, when dirty), `↑N` (ahead), `↓M` (behind), `#N` (PR badge, from `pr.number`, colored by `pr.review_state`: approved=green, changes_requested=red, pending=yellow, draft/absent=gray; `!N` when `pr.kind == "mr"`). No worktree marker: the shortened path already shows a linked worktree's directory, and a prompt shows the branch
 4. **Lines changed**: `+N -M` from cost data, green/red, glued to the branch component
-5. **Model**: Model name in orange (no icon — the name self-identifies), with optional `·<effort>` suffix (`·max`, etc.; `high` suppressed) and style suffix in gray (suppressed for `default`)
-6. **Context bar**: 15-char progress bar (█/░) + percentage, color-coded via `pct_color()` (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%); `┊` tick inserted at the 200k boundary when `context_window_size > 200000`
+5. **Model**: Model name in orange (no icon — the name self-identifies), followed by suffixes that each mark a deviation from the norm, in this order: Nerd Font bolt (`fast_mode`), `·<effort>` (`·max`, etc.; `high` suppressed), `·nothink` (`thinking.enabled == false`), style in gray parens (suppressed for `default`)
+6. **Context bar**: 15-char progress bar (█/░) filled by percentage + the token count (`44k`, `230k`, via `format_tokens(context_tokens())`), color-coded via `pct_color()` (red ≥90%, orange ≥70%, yellow ≥50%, gray <50%); `┊` tick inserted at the 200k boundary when `context_window_size > 200000`. The bar shows the fraction, the number the absolute — one of each
 7. **Cost**: Dollar amount, color-coded (green <$5, yellow <$20, red ≥$20)
 8. **Agent**: Agent name in gray with icon
 9. **Rate limits**: `5h NN%` and/or `7d NN%`, percentages color-coded via `pct_color()`; both windows separated by `·`. Each window appends a gray reset countdown (e.g. `·2h 12m`, day-aware as `·5d 2h`) glued to its percentage, shown only when that window is ≥50% used and `resets_at` is in the future (a stale/elapsed timestamp degrades to no countdown)
@@ -96,15 +99,16 @@ All internal; only `statusline()` is `pub`.
 - `context_tokens(ctx)` — Tokens in the context window from `current_usage`, falling back to `used_percentage` × window size
 - `project_next_cost(tokens, base, ttl_secs)` — Pure math: `(warm, cold)` input-side next-message cost; warm = 0.1×, cold = 1.25× (5m) or 2× (1h)
 - `format_money(usd)` — `<1¢` / `20¢` / `$4.00`; rounds to integer cents first so branch and display agree at the dollar boundary
+- `format_tokens(n)` — Compact token count for the context bar: `512` / `44k` / `1.0M`; rounds to the nearest thousand and rolls into millions when it would otherwise read `1000k`
 
 ### Display Format
 
 ```
-[N] path  branch*↑2↓1 ↟worktree #1234(+N -M) • Model·ultra (style) • 󱦛 ███┊░░░░░░░░░░░░ 22%
+[N] path  branch*↑2↓1 #1234(+N -M) • Model·ultra·nothink (style) • 󱦛 ███┊░░░░░░░░░░░░ 230k
 󰊖 $7.50 • 󰚩 agent • 5h 78%·2h 12m · 7d 34% • 󰑌 98% • 󰔛 3:42pm ·20¢→$4.00
 ```
 
-Claude Code renders each stdout line as a separate statusline row. The split happens only when the single line wouldn't fit `COLUMNS` minus the comfort margin; in a wide terminal the same components render as one bullet-joined line. Components are suppressed when their data is absent — or when they'd merely confirm the norm: vim badge, effort suffix (`high`), style suffix (`default`), rate limits, cache hit rate, cache-break time, and the cost projection all degrade to nothing; the entire second line disappears when it has no components.
+Claude Code renders each stdout line as a separate statusline row. The split happens only when the single line wouldn't fit `COLUMNS` minus the comfort margin; in a wide terminal the same components render as one bullet-joined line. Components are suppressed when their data is absent — or when they'd merely confirm the norm: vim badge, fast-mode bolt, effort suffix (`high`), `·nothink`, style suffix (`default`), rate limits, cache hit rate, cache-break time, and the cost projection all degrade to nothing; the entire second line disappears when it has no components.
 
 ## Dependencies
 

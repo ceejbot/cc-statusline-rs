@@ -29,20 +29,20 @@ struct StatusInput {
     output_style: OutputStyle,
     context_window: Option<ContextWindow>,
     cost: Option<Cost>,
-    worktree: Option<Worktree>,
     agent: Option<Agent>,
     effort: Option<Effort>,
+    thinking: Option<Thinking>,
     vim: Option<Vim>,
     rate_limits: Option<RateLimits>,
     pr: Option<Pr>,
     transcript_path: Option<String>,
+    fast_mode: bool,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Workspace {
     current_dir: Option<String>,
-    git_worktree: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -83,12 +83,6 @@ struct Cost {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct Worktree {
-    name: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
 struct Agent {
     name: Option<String>,
 }
@@ -98,12 +92,19 @@ struct Agent {
 struct Pr {
     number: Option<u64>,
     review_state: Option<String>,
+    kind: Option<String>, // "mr" for GitLab merge requests; absent for GitHub PRs
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Effort {
     level: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Thinking {
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -208,6 +209,10 @@ fn model_display(input: &StatusInput) -> String {
         return String::new();
     };
     let model = model.replace(" (1M context)", "");
+    // Every suffix marks a deviation from the norm; the norm itself is noise.
+    // Nerd Font bolt rather than U+26A1, which is double-width in many
+    // terminals and would throw off the single-line fit calculation.
+    let fast_suffix = if input.fast_mode { "\u{f0e7}" } else { "" };
     let effort_suffix = input
         .effort
         .as_ref()
@@ -215,8 +220,11 @@ fn model_display(input: &StatusInput) -> String {
         .filter(|&l| l != "high")
         .map(|l| format!("·{l}"))
         .unwrap_or_default();
-    // The style badge marks deviation: the default style is the norm and
-    // saying so is noise.
+    // Absent means unknown, not off: only an explicit false earns the badge.
+    let thinking_suffix = match input.thinking.as_ref().and_then(|t| t.enabled) {
+        Some(false) => "·nothink",
+        _ => "",
+    };
     let style_suffix = input
         .output_style
         .name
@@ -224,7 +232,7 @@ fn model_display(input: &StatusInput) -> String {
         .filter(|s| !s.eq_ignore_ascii_case("default"))
         .map(|style| format!(" {GRAY}({style}){RESET}"))
         .unwrap_or_default();
-    format!("{ORANGE}{model}{effort_suffix}{style_suffix}")
+    format!("{ORANGE}{model}{fast_suffix}{effort_suffix}{thinking_suffix}{style_suffix}")
 }
 
 fn context_display(ctx: &ContextWindow) -> String {
@@ -258,10 +266,13 @@ fn context_display(ctx: &ContextWindow) -> String {
         bar.push(if i < filled { '\u{2588}' } else { '\u{2591}' });
     }
 
+    // The bar already shows the fraction; the number adds the absolute.
+    // `context_tokens` makes the same usage-first / percentage-fallback
+    // choice, so the figure and the fill agree by construction.
     format!(
-        "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {}{}%{RESET}",
+        "{LIGHT_MAGENTA}\u{f49b} {GRAY}{bar}{RESET} {}{}{RESET}",
         pct_color(pct),
-        pct.round() as u32
+        format_tokens(context_tokens(ctx).unwrap_or(0))
     )
 }
 
@@ -401,23 +412,16 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
         if status.behind > 0 {
             s.push_str(&format!(" {GRAY}\u{2193}{}{RESET}", status.behind));
         }
-        let worktree_name = input
-            .worktree
-            .as_ref()
-            .and_then(|w| w.name.as_deref())
-            .or(input.workspace.git_worktree.as_deref())
-            .filter(|n| !n.is_empty());
-        if let Some(n) = worktree_name {
-            s.push_str(&format!(" {GRAY}\u{219f}{n}{RESET}"));
-        }
-        if let Some(number) = input.pr.as_ref().and_then(|p| p.number) {
-            let color = match input.pr.as_ref().and_then(|p| p.review_state.as_deref()) {
+        if let Some((pr, number)) = input.pr.as_ref().and_then(|p| p.number.map(|n| (p, n))) {
+            let color = match pr.review_state.as_deref() {
                 Some("approved") => GREEN,
                 Some("changes_requested") => RED,
                 Some("pending") => YELLOW,
                 _ => GRAY, // draft, or absent review_state
             };
-            s.push_str(&format!(" {color}\u{f407}#{number}{RESET}"));
+            // GitLab writes merge requests as !N; everything else is #N.
+            let sigil = if pr.kind.as_deref() == Some("mr") { '!' } else { '#' };
+            s.push_str(&format!(" {color}\u{f407}{sigil}{number}{RESET}"));
         }
         s
     });
@@ -677,6 +681,21 @@ fn format_money(usd: f64) -> String {
         format!("{cents}¢")
     } else {
         format!("${}.{:02}", cents / 100, cents % 100)
+    }
+}
+
+/// Compact token count for the context bar: `512`, `44k`, `1.0M`. Rounds to
+/// the nearest thousand, rolling into millions when the rounded figure would
+/// otherwise read `1000k`.
+fn format_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    let thousands = (tokens as f64 / 1_000.0).round() as u64;
+    if thousands < 1_000 {
+        format!("{thousands}k")
+    } else {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
     }
 }
 
@@ -1237,6 +1256,23 @@ mod tests {
         assert_eq!(format_money(12.345), "$12.35");
     }
 
+    // --- format_tokens ---
+
+    #[test]
+    fn format_tokens_boundaries() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(999), "999");
+        assert_eq!(format_tokens(1_000), "1k");
+        assert_eq!(format_tokens(1_499), "1k");
+        assert_eq!(format_tokens(1_500), "2k");
+        assert_eq!(format_tokens(44_200), "44k");
+        assert_eq!(format_tokens(999_499), "999k");
+        // Would round to 1000k; roll into millions instead.
+        assert_eq!(format_tokens(999_500), "1.0M");
+        assert_eq!(format_tokens(1_000_000), "1.0M");
+        assert_eq!(format_tokens(1_234_567), "1.2M");
+    }
+
     // --- format_break_time ---
 
     fn fixed_tz(hours: i8) -> jiff::tz::TimeZone {
@@ -1266,8 +1302,8 @@ mod tests {
         assert!(input.model.display_name.is_none());
         assert!(input.context_window.is_none());
         assert!(input.cost.is_none());
-        assert!(input.worktree.is_none());
         assert!(input.agent.is_none());
+        assert!(!input.fast_mode);
     }
 
     #[test]
@@ -1302,10 +1338,6 @@ mod tests {
             Some(42.5)
         );
         assert_eq!(input.cost.as_ref().expect("cost present").total_cost_usd, 3.50);
-        assert_eq!(
-            input.worktree.as_ref().expect("worktree present").name.as_deref(),
-            Some("feat")
-        );
         assert_eq!(
             input.agent.as_ref().expect("agent present").name.as_deref(),
             Some("reviewer")
@@ -1480,7 +1512,8 @@ mod tests {
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("high context JSON should deserialize");
         let output = render(&input);
-        assert!(output.contains("95%"));
+        // 95% of a 200k window, derived from the percentage.
+        assert!(output.contains("190k"));
         assert!(output.contains(RED));
     }
 
@@ -1492,12 +1525,11 @@ mod tests {
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("low context JSON should deserialize");
         let output = render(&input);
-        assert!(output.contains("20%"));
-        // Gray is used for low percentages — check the percentage is colored gray
-        // The output has the pattern: {pct_color}20%{RESET}
-        let pct_idx = output.find("20%").expect("output should contain 20%");
-        let preceding = &output[..pct_idx];
-        assert!(preceding.ends_with(GRAY));
+        // 20% of 200k → 40k, and the figure is colored by the same pct_color
+        // bands as the bar: {pct_color}40k{RESET}.
+        let tok_idx = output.find("40k").expect("output should contain 40k");
+        assert!(output[..tok_idx].ends_with(GRAY));
+        assert!(!output.contains("20%"));
     }
 
     #[test]
@@ -1511,8 +1543,9 @@ mod tests {
         }"#;
         let input: StatusInput = serde_json::from_str(json).expect("fallback context JSON should deserialize");
         let output = render(&input);
-        // (30000+10000+10000)/100000 = 50%
-        assert!(output.contains("50%"));
+        // 30000+10000+10000 = 50k of a 100k window: half-filled bar, yellow.
+        assert!(output.contains(&format!("{YELLOW}50k")));
+        assert!(output.contains("\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}"));
     }
 
     #[test]
@@ -1553,7 +1586,7 @@ mod tests {
         let output = render_with_width(&layout_input(), None);
         let (first, second) = output.split_once('\n').expect("output has two lines");
         assert!(first.contains("Opus"));
-        assert!(first.contains("20%"));
+        assert!(first.contains("40k"));
         assert!(second.contains("3.50"));
     }
 
@@ -1828,6 +1861,18 @@ mod tests {
     }
 
     #[test]
+    fn statusline_pr_badge_gitlab_mr_uses_bang_sigil() {
+        let this_dir = env!("CARGO_MANIFEST_DIR");
+        let json = format!(
+            r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 42, "kind": "mr", "review_state": "approved"}}}}"#
+        );
+        let input: StatusInput = serde_json::from_str(&json).expect("mr JSON should deserialize");
+        let output = render(&input);
+        assert!(output.contains("\u{f407}!42"));
+        assert!(!output.contains("#42"));
+    }
+
+    #[test]
     fn statusline_pr_badge_absent_renders_nothing() {
         let this_dir = env!("CARGO_MANIFEST_DIR");
         let json = format!(r#"{{"workspace": {{"current_dir": "{this_dir}"}}}}"#);
@@ -1843,6 +1888,53 @@ mod tests {
         let input: StatusInput = serde_json::from_str(&json).expect("pr-without-number JSON should deserialize");
         let output = render(&input);
         assert!(!output.contains("\u{f407}"));
+    }
+
+    // --- fast mode, thinking ---
+
+    #[test]
+    fn statusline_fast_mode_shows_bolt() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}, "fast_mode": true}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("fast-mode JSON deserializes");
+        assert!(render(&input).contains("Opus\u{f0e7}"));
+    }
+
+    #[test]
+    fn statusline_fast_mode_false_suppressed() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}, "fast_mode": false}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("fast-mode JSON deserializes");
+        assert!(!render(&input).contains('\u{f0e7}'));
+    }
+
+    #[test]
+    fn statusline_fast_mode_precedes_effort_suffix() {
+        let json = r#"{
+            "workspace": {"current_dir": "/tmp"},
+            "model": {"display_name": "Opus"},
+            "fast_mode": true,
+            "effort": {"level": "max"}
+        }"#;
+        let input: StatusInput = serde_json::from_str(json).expect("JSON deserializes");
+        assert!(render(&input).contains("Opus\u{f0e7}·max"));
+    }
+
+    #[test]
+    fn statusline_thinking_disabled_shows_nothink() {
+        let json = r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}, "thinking": {"enabled": false}}"#;
+        let input: StatusInput = serde_json::from_str(json).expect("thinking JSON deserializes");
+        assert!(render(&input).contains("Opus·nothink"));
+    }
+
+    #[test]
+    fn statusline_thinking_enabled_or_absent_suppressed() {
+        for json in [
+            r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}, "thinking": {"enabled": true}}"#,
+            r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}, "thinking": {}}"#,
+            r#"{"workspace": {"current_dir": "/tmp"}, "model": {"display_name": "Opus"}}"#,
+        ] {
+            let input: StatusInput = serde_json::from_str(json).expect("thinking JSON deserializes");
+            assert!(!render(&input).contains("nothink"), "unexpected badge for {json}");
+        }
     }
 
     // --- effort: ultra (Opus 4.8) ---

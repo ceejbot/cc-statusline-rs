@@ -46,10 +46,10 @@ The first group is identity — where you are, what the model is doing:
 
 - **Vim mode badge** (`[N]`, `[I]`, `[V]`), when you have vim keybindings on
 - **Working directory**, fish-style shortened (`~/c/f/cc-statusline-rs`)
-- **Git branch**, with a red `*` when dirty, `↑`/`↓` ahead-behind counts, a `↟name` worktree marker, and a `#1234` PR badge colored by review state
+- **Git branch**, with a red `*` when dirty, `↑`/`↓` ahead-behind counts, and a `#1234` PR badge colored by review state (`!1234` for a GitLab merge request)
 - **Lines added and removed** this session
-- **Model name**, with a reasoning-effort suffix (`·max`) and the output style in parens — both shown only when they deviate from the defaults
-- **Context-window usage** as a progress bar with a percentage, color-shifting as it fills; 1M-context models get a `┊` tick at the 200k boundary
+- **Model name**, with a bolt when fast mode is on, a reasoning-effort suffix (`·max`), `·nothink` when extended thinking is off, and the output style in parens — each shown only when it deviates from the defaults
+- **Context-window usage** as a progress bar with the token count beside it (`44k`, `230k`), color-shifting as it fills; 1M-context models get a `┊` tick at the 200k boundary. The bar shows the fraction, the number shows the absolute
 
 The second group is accounting:
 
