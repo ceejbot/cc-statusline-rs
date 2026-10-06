@@ -236,7 +236,8 @@ fn model_display(input: &StatusInput) -> String {
 }
 
 fn context_display(ctx: &ContextWindow) -> String {
-    // Use API-provided percentage when available, fall back to manual calculation
+    // Use API-provided percentage when available, fall back to manual
+    // calculation
     let pct = if let Some(api_pct) = ctx.used_percentage {
         api_pct.min(100.0)
     } else {
@@ -342,8 +343,9 @@ fn render_with_width(input: &StatusInput, cols: Option<usize>) -> String {
             for (label, win) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
                 if let Some(w) = win {
                     // Surface the reset countdown only once a window starts to
-                    // matter (>=50%, the first non-gray pct_color band) and only
-                    // when resets_at is present and still in the future.
+                    // matter (>=50%, the first non-gray pct_color band) and
+                    // only when resets_at is present and
+                    // still in the future.
                     let reset = w
                         .resets_at
                         .filter(|_| w.used_percentage >= 50.0)
@@ -568,8 +570,12 @@ struct GitStatus {
 }
 
 fn git_status(dir: &str) -> Option<GitStatus> {
+    // `git status` normally writes its refreshed stat cache back to the index,
+    // which takes `index.lock`. A statusline polling every few seconds would
+    // then race every `git add`/`commit`/`checkout` in the same repo.
+    // `--no-optional-locks` skips that write; the output is unchanged.
     let output = Command::new("git")
-        .args(["status", "--porcelain=v2", "--branch"])
+        .args(["--no-optional-locks", "status", "--porcelain=v2", "--branch"])
         .current_dir(dir)
         .output()
         .ok()?;
@@ -1289,7 +1295,8 @@ mod tests {
     fn break_time_morning_and_midnight() {
         // 2026-08-08 16:05:00 UTC → 9:05am at UTC-7.
         assert_eq!(format_break_time(1_786_205_100, &fixed_tz(-7)), "9:05am");
-        // 2026-08-08 07:10:00 UTC → 12:10am at UTC-7 (12-hour clock, no 0 o'clock).
+        // 2026-08-08 07:10:00 UTC → 12:10am at UTC-7 (12-hour clock, no 0
+        // o'clock).
         assert_eq!(format_break_time(1_786_173_000, &fixed_tz(-7)), "12:10am");
     }
 
@@ -1749,9 +1756,10 @@ mod tests {
 
     #[test]
     fn statusline_rate_limits_countdown_shown_when_high() {
-        // >=50% with a future resets_at (~2h12m out) → countdown appears. The +30s
-        // buffer keeps the minute field stable against the seconds elapsed between
-        // computing the timestamp and render() reading the clock.
+        // >=50% with a future resets_at (~2h12m out) → countdown appears. The
+        // +30s buffer keeps the minute field stable against the seconds
+        // elapsed between computing the timestamp and render() reading
+        // the clock.
         let resets_at = epoch_now() + 2 * 3_600 + 12 * 60 + 30;
         let json = format!(
             r#"{{
@@ -1793,8 +1801,8 @@ mod tests {
         let input: StatusInput = serde_json::from_str(&json).expect("rate-limits JSON deserializes");
         let output = render(&input);
         assert!(output.contains("88%"));
-        // The countdown renders as `<pct>%{RESET}{GRAY}·<dur>`; that signature must
-        // be absent when the window has already reset.
+        // The countdown renders as `<pct>%{RESET}{GRAY}·<dur>`; that signature
+        // must be absent when the window has already reset.
         assert!(!output.contains(&format!("%{RESET}{GRAY}\u{b7}")));
     }
 
@@ -1835,7 +1843,8 @@ mod tests {
 
     #[test]
     fn statusline_pr_badge_approved_green() {
-        // The badge is glued to the git branch, so use this repo's dir (a git repo).
+        // The badge is glued to the git branch, so use this repo's dir (a git
+        // repo).
         let this_dir = env!("CARGO_MANIFEST_DIR");
         let json = format!(
             r#"{{"workspace": {{"current_dir": "{this_dir}"}}, "pr": {{"number": 1234, "review_state": "approved"}}}}"#
